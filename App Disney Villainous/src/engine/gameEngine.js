@@ -1,0 +1,853 @@
+// ============================================================
+// Disney Villainous — Game Engine
+// Tutta la logica di gioco vive qui.
+// Le funzioni sono PURE: ricevono uno state, restituiscono il nuovo state.
+// Il componente useGame chiama queste funzioni e aggiorna Supabase.
+// ============================================================
+
+import { VILLAINS, findCard, findLocation } from '../data/villains.js'
+
+// ─── UTILITY ────────────────────────────────────────────────
+
+export function generateId() {
+  return Math.random().toString(36).slice(2, 9)
+}
+
+export function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+}
+
+function shuffle(array) {
+  const a = [...array]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj))
+}
+
+function addLog(state, message, type = 'info') {
+  const entry = { id: generateId(), message, type, ts: Date.now() }
+  return {
+    ...state,
+    log: [...(state.log || []).slice(-49), entry], // max 50 righe log
+  }
+}
+
+// ─── INIZIALIZZAZIONE ────────────────────────────────────────
+
+/**
+ * Crea lo state iniziale di gioco dopo la selezione dei villain.
+ * Viene chiamato dall'host quando tutti i giocatori sono pronti.
+ */
+export function initializeGame(players) {
+  // players = [{ id, sessionId, name, villainId, isHost }]
+  const initializedPlayers = players.map((p) => {
+    const villain = VILLAINS[p.villainId]
+    if (!villain) throw new Error(`Villain sconosciuto: ${p.villainId}`)
+
+    // Costruisce i deck shuffled con gli id delle carte
+    const villainDeckIds = shuffle(villain.villainDeck.map(c => c.id))
+    const fateDeckIds    = shuffle(villain.fateDeck.map(c => c.id))
+
+    // Board iniziale: tutti i luoghi vuoti
+    const board = {
+      locations: villain.locations.map(loc => ({
+        id: loc.id,
+        allies:              [],
+        items:               [],
+        heroes:              [],
+        curses:              [],
+        wickets:             [],
+        coveredActionIndices: [],
+      }))
+    }
+
+    // Dealer: mano iniziale
+    const hand = villainDeckIds.slice(0, villain.handSize)
+    const remainingDeck = villainDeckIds.slice(villain.handSize)
+
+    return {
+      id:              p.id,
+      sessionId:       p.sessionId,
+      name:            p.name,
+      villainId:       p.villainId,
+      isHost:          p.isHost,
+      power:           villain.startingPower,
+      currentLocation: 0,
+      lastLocation:    -1,
+      hand,
+      villainDeck:     remainingDeck,
+      fateDeck:        fateDeckIds,
+      villainDiscard:  [],
+      fateDiscard:     [],
+      hasWon:          false,
+      board,
+    }
+  })
+
+  const state = {
+    status:           'playing',
+    currentPlayerIndex: 0,
+    phase:            'move',          // move | action | fate_choice | end_turn
+    actionQueue:      [],              // azioni rimaste da fare nel turno corrente
+    pendingFate:      null,            // { targetPlayerId, cards: [id, id] }
+    pendingInteraction: null,          // per effetti card-specifici
+    log:              [],
+    winnerId:         null,
+    players:          initializedPlayers,
+  }
+
+  return addLog(state, 'La partita ha inizio! Che vinca il più cattivo!', 'system')
+}
+
+// ─── GETTERS ────────────────────────────────────────────────
+
+export function getCurrentPlayer(state) {
+  return state.players[state.currentPlayerIndex]
+}
+
+export function getPlayerById(state, playerId) {
+  return state.players.find(p => p.id === playerId)
+}
+
+export function getPlayerIndex(state, playerId) {
+  return state.players.findIndex(p => p.id === playerId)
+}
+
+export function getOpponents(state, playerId) {
+  return state.players.filter(p => p.id !== playerId)
+}
+
+export function getLocationState(player, locationIndex) {
+  return player.board.locations[locationIndex]
+}
+
+// Tutte le carte (villain + fate) come oggetti, non solo id
+export function getCardObjects(player, cardIds) {
+  const villain = VILLAINS[player.villainId]
+  if (!villain) return []
+  const allCards = [...villain.villainDeck, ...villain.fateDeck]
+  return cardIds.map(id => allCards.find(c => c.id === id)).filter(Boolean)
+}
+
+// ─── WIN CONDITION CHECK ─────────────────────────────────────
+
+/**
+ * Verifica la condizione di vittoria per un giocatore.
+ * Viene chiamato all'INIZIO del turno del giocatore (dopo move, prima delle azioni).
+ * Ritorna true se il giocatore ha vinto.
+ */
+export function checkWinCondition(state, playerId) {
+  const player = getPlayerById(state, playerId)
+  if (!player) return false
+  const villain = VILLAINS[player.villainId]
+  if (!villain) return false
+
+  switch (villain.winConditionId) {
+    case 'curse_all_locations': {
+      // Malefica: almeno 1 Maledizione in ognuno dei 4 luoghi
+      return player.board.locations.every(loc => loc.curses.length > 0)
+    }
+    case 'lamp_and_genie': {
+      // Jafar: Lampada Magica nel Palazzo del Sultano E Genio Soggiogato
+      const sultanLoc = player.board.locations.find(l => l.id === 'palazzo_sultano')
+      if (!sultanLoc) return false
+      const hasLamp   = sultanLoc.items.includes('jaf_lampada')
+      const genieSub  = player.genieSubjugated === true
+      return hasLamp && genieSub
+    }
+    case 'defeat_peter_pan': {
+      // Uncino: Peter Pan sconfitto (panDefeated = true)
+      return player.panDefeated === true
+    }
+    case 'trident_and_crown': {
+      // Ursula: possiede Tridente E Corona (in qualsiasi luogo o nella sua area)
+      const allItems = player.board.locations.flatMap(l => l.items)
+      return allItems.includes('urs_tridente') && allItems.includes('urs_corona')
+    }
+    case 'twenty_power': {
+      // Principe Giovanni: ≥ 20 Potere
+      return player.power >= 20
+    }
+    case 'wicket_all_locations': {
+      // Regina di Cuori: 1 Wicket in ogni luogo
+      return player.board.locations.every(loc => loc.wickets.length > 0)
+    }
+    default:
+      return false
+  }
+}
+
+// ─── AZIONI DI TURNO ────────────────────────────────────────
+
+/**
+ * Fase MOVE: sposta il villain in un nuovo luogo.
+ * Non puoi restare nello stesso luogo del turno precedente
+ * (tranne al primo turno dove lastLocation = -1).
+ */
+export function moveVillain(state, playerId, locationIndex) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+
+  // Validazione: non puoi restare fermo
+  if (locationIndex === player.lastLocation) {
+    return { error: 'Non puoi tornare nello stesso luogo del turno precedente.' }
+  }
+  if (locationIndex < 0 || locationIndex >= villain.locations.length) {
+    return { error: 'Luogo non valido.' }
+  }
+  if (state.phase !== 'move') {
+    return { error: 'Non è il momento di muoversi.' }
+  }
+
+  const newPlayers = deepClone(state.players)
+  newPlayers[pidx].lastLocation    = newPlayers[pidx].currentLocation
+  newPlayers[pidx].currentLocation = locationIndex
+
+  // Costruisce la coda delle azioni per questo turno
+  const loc = villain.locations[locationIndex]
+  const locState = newPlayers[pidx].board.locations[locationIndex]
+  const actionQueue = loc.actions.map((a, i) => ({
+    ...a,
+    index: i,
+    covered: locState.coveredActionIndices.includes(i),
+    done: false,
+  }))
+
+  let newState = {
+    ...state,
+    players: newPlayers,
+    phase: 'action',
+    actionQueue,
+  }
+
+  const locName = villain.locations[locationIndex].name
+  newState = addLog(newState, `${player.name} si sposta in "${locName}".`, 'move')
+
+  // Check win condition all'inizio del turno (dopo move, prima delle azioni)
+  if (checkWinCondition(newState, playerId)) {
+    newState = {
+      ...newState,
+      status: 'game_over',
+      winnerId: playerId,
+    }
+    newState = addLog(newState, `🏆 ${player.name} ha vinto!`, 'win')
+  }
+
+  return newState
+}
+
+/**
+ * Segna un'azione come completata (o saltata).
+ * Il giocatore può saltare qualsiasi azione.
+ */
+export function completeAction(state, playerId, actionIndex) {
+  if (state.currentPlayerIndex !== getPlayerIndex(state, playerId)) {
+    return { error: 'Non è il tuo turno.' }
+  }
+
+  const newQueue = state.actionQueue.map(a =>
+    a.index === actionIndex ? { ...a, done: true } : a
+  )
+
+  let newState = { ...state, actionQueue: newQueue }
+
+  // Se tutte le azioni sono done o coperte → end turn
+  const allDone = newQueue.every(a => a.done || a.covered)
+  if (allDone) {
+    newState = endTurn(newState)
+  }
+
+  return newState
+}
+
+/**
+ * Azione GAIN POWER: guadagna Potere.
+ */
+export function gainPower(state, playerId, amount) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const newPlayers = deepClone(state.players)
+  newPlayers[pidx].power = Math.max(0, newPlayers[pidx].power + amount)
+
+  let newState = { ...state, players: newPlayers }
+  const p = newPlayers[pidx]
+  newState = addLog(newState, `${p.name} guadagna ${amount} Potere (tot: ${p.power}).`, 'action')
+  return newState
+}
+
+/**
+ * Azione REMOVE POWER: rimuove Potere da un giocatore.
+ */
+export function removePower(state, targetPlayerId, amount) {
+  const pidx = getPlayerIndex(state, targetPlayerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const newPlayers = deepClone(state.players)
+  newPlayers[pidx].power = Math.max(0, newPlayers[pidx].power - amount)
+
+  let newState = { ...state, players: newPlayers }
+  const p = newPlayers[pidx]
+  newState = addLog(newState, `${p.name} perde ${amount} Potere (tot: ${p.power}).`, 'action')
+  return newState
+}
+
+/**
+ * Azione PLAY CARD (villain card): gioca una carta dalla mano.
+ * Allies/Items → si posizionano nel luogo corrente (o targetLocation per curse/wicket).
+ * Effects → si risolvono e vanno nello scarto.
+ * Curses/Wickets → vanno nel loro luogo designato.
+ */
+export function playVillainCard(state, playerId, cardId, overrideLocationIndex = null) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+  const card = villain.villainDeck.find(c => c.id === cardId)
+  if (!card) return { error: 'Carta non trovata nel mazzo villain.' }
+
+  if (!player.hand.includes(cardId)) return { error: 'Carta non in mano.' }
+
+  // Verifica costo
+  if ((card.cost || 0) > player.power) {
+    return { error: `Potere insufficiente. Costo: ${card.cost}, disponibile: ${player.power}.` }
+  }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+
+  // Paga il costo
+  np.power -= (card.cost || 0)
+
+  // Rimuovi dalla mano
+  np.hand = np.hand.filter(id => id !== cardId)
+
+  // Determina dove va la carta
+  let targetLocIdx = overrideLocationIndex ?? np.currentLocation
+
+  if (card.type === 'curse' && card.targetLocation) {
+    const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
+    if (tLocIdx >= 0) targetLocIdx = tLocIdx
+  }
+  if (card.type === 'wicket' && card.targetLocation) {
+    const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
+    if (tLocIdx >= 0) targetLocIdx = tLocIdx
+  }
+
+  const loc = np.board.locations[targetLocIdx]
+
+  switch (card.type) {
+    case 'ally':
+      loc.allies.push(cardId)
+      break
+    case 'item':
+      loc.items.push(cardId)
+      break
+    case 'curse':
+      loc.curses.push(cardId)
+      break
+    case 'wicket':
+      loc.wickets.push(cardId)
+      break
+    case 'effect':
+      // Effetti: vanno in scarto, la risoluzione è manuale/UI
+      np.villainDiscard.push(cardId)
+      break
+    default:
+      np.villainDiscard.push(cardId)
+  }
+
+  let newState = { ...state, players: newPlayers }
+  const locName = villain.locations[targetLocIdx].name
+  newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}".`, 'action')
+
+  // Check win dopo ogni carta (es. Principe Giovanni guadagna potere da effetti)
+  if (checkWinCondition(newState, playerId)) {
+    newState = {
+      ...newState,
+      status: 'game_over',
+      winnerId: playerId,
+    }
+    newState = addLog(newState, `🏆 ${player.name} ha vinto!`, 'win')
+  }
+
+  return newState
+}
+
+/**
+ * Azione DRAW: pesca carte fino alla dimensione mano.
+ * (Chiamata alla fine del turno)
+ */
+export function drawCards(state, playerId, count = null) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const villain = VILLAINS[np.villainId]
+  const toDraw = count ?? Math.max(0, villain.handSize - np.hand.length)
+
+  if (toDraw === 0) return { ...state, players: newPlayers }
+
+  // Se il mazzo è esaurito, rimescola lo scarto
+  if (np.villainDeck.length < toDraw) {
+    const recycled = shuffle([...np.villainDiscard])
+    np.villainDeck = [...np.villainDeck, ...recycled]
+    np.villainDiscard = []
+  }
+
+  const drawn = np.villainDeck.splice(0, toDraw)
+  np.hand = [...np.hand, ...drawn]
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${np.name} pesca ${drawn.length} carta/e.`, 'action')
+  return newState
+}
+
+/**
+ * Azione DISCARD: scarta una carta dalla mano.
+ */
+export function discardCard(state, playerId, cardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  if (!np.hand.includes(cardId)) return { error: 'Carta non in mano.' }
+
+  np.hand = np.hand.filter(id => id !== cardId)
+  np.villainDiscard.push(cardId)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${np.name} scarta una carta.`, 'action')
+  return newState
+}
+
+/**
+ * Azione MOVE ALLY/ITEM: sposta un alleato o oggetto a un luogo adiacente.
+ */
+export function moveAllyOrItem(state, playerId, cardId, fromLocationIndex, toLocationIndex) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const villain = VILLAINS[state.players[pidx].villainId]
+  const maxIdx  = villain.locations.length - 1
+
+  // Validazione adiacenza (solo 1 step, oppure qualsiasi con certi effetti)
+  if (Math.abs(fromLocationIndex - toLocationIndex) !== 1) {
+    return { error: 'Puoi spostare solo in un luogo adiacente.' }
+  }
+  if (toLocationIndex < 0 || toLocationIndex > maxIdx) {
+    return { error: 'Luogo di destinazione non valido.' }
+  }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const from = np.board.locations[fromLocationIndex]
+  const to   = np.board.locations[toLocationIndex]
+
+  // Trova e sposta la carta
+  const categories = ['allies', 'items', 'curses', 'wickets']
+  let moved = false
+  for (const cat of categories) {
+    const idx = from[cat].indexOf(cardId)
+    if (idx >= 0) {
+      from[cat].splice(idx, 1)
+      to[cat].push(cardId)
+      moved = true
+      break
+    }
+  }
+  if (!moved) return { error: 'Carta non trovata nel luogo specificato.' }
+
+  const fromName = villain.locations[fromLocationIndex].name
+  const toName   = villain.locations[toLocationIndex].name
+  const card = findCard(state.players[pidx].villainId, cardId)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${np.name} sposta "${card?.name || cardId}" da "${fromName}" a "${toName}".`, 'action')
+  return newState
+}
+
+// ─── AZIONE VANQUISH ─────────────────────────────────────────
+
+/**
+ * Sconfiggi un Eroe usando Alleati nel tuo luogo corrente.
+ * Regola: forza totale degli alleati usati ≥ forza dell'Eroe.
+ * Gli alleati usati non vengono rimossi (rimangono in gioco).
+ * ECCEZIONE Peter Pan: deve avvenire sulla Jolly Roger per vincere.
+ */
+export function vanquish(state, playerId, heroCardId, allyCardIds) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+  const locIdx = player.currentLocation
+  const loc = player.board.locations[locIdx]
+
+  // Verifica che l'Eroe sia nel luogo corrente
+  if (!loc.heroes.includes(heroCardId)) {
+    return { error: 'L\'Eroe non è nel tuo luogo corrente.' }
+  }
+
+  // Verifica che tutti gli alleati siano nel luogo corrente
+  for (const allyId of allyCardIds) {
+    if (!loc.allies.includes(allyId)) {
+      return { error: `L\'Alleato ${allyId} non è nel tuo luogo corrente.` }
+    }
+  }
+
+  // Calcola forza totale alleati
+  const totalAllyStrength = allyCardIds.reduce((sum, allyId) => {
+    const ally = villain.villainDeck.find(c => c.id === allyId)
+    return sum + (ally?.strength || 0)
+  }, 0)
+
+  // Forza dell'Eroe: cerca in tutti i mazzi Fato di tutti i giocatori
+  let heroCard = null
+  for (const p of state.players) {
+    const v = VILLAINS[p.villainId]
+    heroCard = v?.fateDeck.find(c => c.id === heroCardId)
+    if (heroCard) break
+  }
+  const heroStrength = heroCard?.strength || 0
+
+  if (totalAllyStrength < heroStrength) {
+    return {
+      error: `Forza insufficiente. Alleati: ${totalAllyStrength}, Eroe: ${heroStrength}.`
+    }
+  }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const nloc = np.board.locations[locIdx]
+
+  // Rimuovi l'Eroe dal luogo
+  nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
+
+  // Trova il proprietario dell'Eroe (chi lo ha giocato da Fato)
+  // → va nella fateDiscard del proprietario. Per semplicità andiamo nella fateDiscard del giocatore corrente.
+  np.fateDiscard.push(heroCardId)
+
+  // Rimuovi coveredActions causate dall'Eroe (se presenti)
+  // (la UI può gestire questo mantenendo traccia di quale Eroe copre quale azione)
+  // Per ora rimuoviamo tutte le coveredActions nel luogo se l'eroe era l'unico a coprire
+
+  let newState = { ...state, players: newPlayers }
+  const locName = villain.locations[locIdx].name
+  newState = addLog(
+    newState,
+    `${player.name} sconfigge "${heroCard?.name || heroCardId}" in "${locName}" (forza alleati: ${totalAllyStrength} vs ${heroStrength}).`,
+    'action'
+  )
+
+  // Caso speciale: Peter Pan sconfitto sulla Jolly Roger
+  if (heroCardId === 'fhk_pan' && locIdx === 2) { // Jolly Roger = index 2
+    newPlayers[pidx].panDefeated = true
+    if (checkWinCondition({ ...newState, players: newPlayers }, playerId)) {
+      newState = {
+        ...newState,
+        players: newPlayers,
+        status: 'game_over',
+        winnerId: playerId,
+      }
+      newState = addLog(newState, `🏆 ${player.name} ha sconfitto Peter Pan! Vittoria!`, 'win')
+    }
+  }
+
+  return newState
+}
+
+// ─── AZIONE FATE ─────────────────────────────────────────────
+
+/**
+ * Avvia la Fate action: pesca 2 carte dal mazzo Fato dell'avversario scelto.
+ * Mette lo state in fase 'fate_choice' con le 2 carte disponibili.
+ */
+export function startFate(state, playerId, targetPlayerId) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Avversario non trovato' }
+
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+
+  // Ricicla se esaurito
+  if (target.fateDeck.length === 0 && target.fateDiscard.length > 0) {
+    target.fateDeck   = shuffle([...target.fateDiscard])
+    target.fateDiscard = []
+  }
+
+  const drawn = target.fateDeck.splice(0, 2)
+  if (drawn.length === 0) return { error: 'Il mazzo Fato dell\'avversario è vuoto.' }
+
+  let newState = {
+    ...state,
+    players: newPlayers,
+    phase: 'fate_choice',
+    pendingFate: {
+      actingPlayerId: playerId,
+      targetPlayerId,
+      cards: drawn,
+    },
+  }
+
+  const actor = getPlayerById(state, playerId)
+  const targetP = getPlayerById(state, targetPlayerId)
+  newState = addLog(
+    newState,
+    `${actor?.name} usa Fato contro ${targetP?.name}! (pescate ${drawn.length} carte)`,
+    'fate'
+  )
+  return newState
+}
+
+/**
+ * Risolve la scelta Fate: gioca una carta, restituisce l'altra allo scarto.
+ */
+export function resolveFate(state, chosenCardId) {
+  const { pendingFate } = state
+  if (!pendingFate) return { error: 'Nessuna azione Fato in corso.' }
+
+  const { actingPlayerId, targetPlayerId, cards } = pendingFate
+  const discardedId = cards.find(id => id !== chosenCardId)
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore non trovato.' }
+
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+
+  // Restituisce la carta non scelta allo scarto Fato
+  if (discardedId) target.fateDiscard.push(discardedId)
+
+  // La carta scelta viene "giocata" sul regno del target
+  // → tipo hero: va in un luogo del regno target (luogo scelto dall'attore in UI)
+  // → tipo fate_effect / fate_item: risoluzione immediata
+  // Per ora mettiamo la carta in pendingInteraction per la UI
+  let newState = {
+    ...state,
+    players: newPlayers,
+    phase: 'fate_resolve',
+    pendingFate: null,
+    pendingInteraction: {
+      type: 'place_fate_card',
+      cardId: chosenCardId,
+      targetPlayerId,
+      actingPlayerId,
+    },
+  }
+
+  const actor = getPlayerById(state, actingPlayerId)
+  const fateCard = findFateCard(state, chosenCardId)
+  newState = addLog(
+    newState,
+    `${actor?.name} gioca "${fateCard?.name || chosenCardId}" dal Fato.`,
+    'fate'
+  )
+  return newState
+}
+
+/**
+ * Posiziona una carta Fato (hero) su un luogo del regno del target.
+ */
+export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore non trovato.' }
+
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+  const loc = target.board.locations[locationIndex]
+
+  const fateCard = findFateCard(state, cardId)
+  if (!fateCard) return { error: 'Carta Fato non trovata.' }
+
+  switch (fateCard.type) {
+    case 'hero':
+      loc.heroes.push(cardId)
+      // Copre azioni se specificato
+      if (fateCard.coversAction !== null && fateCard.coversAction !== undefined) {
+        if (!loc.coveredActionIndices.includes(fateCard.coversAction)) {
+          loc.coveredActionIndices.push(fateCard.coversAction)
+        }
+      }
+      break
+    case 'fate_item':
+      loc.items.push(cardId)
+      break
+    case 'fate_effect':
+      // Gli effetti Fato si risolvono e vanno allo scarto — gestiti dalla UI
+      target.fateDiscard.push(cardId)
+      break
+  }
+
+  const villain = VILLAINS[target.villainId]
+  const locName = villain?.locations[locationIndex]?.name || '?'
+
+  let newState = {
+    ...state,
+    players: newPlayers,
+    phase: 'action',
+    pendingInteraction: null,
+  }
+
+  newState = addLog(
+    newState,
+    `"${fateCard.name}" posizionato in "${locName}" di ${target.name}.`,
+    'fate'
+  )
+  return newState
+}
+
+function findFateCard(state, cardId) {
+  for (const p of state.players) {
+    const v = VILLAINS[p.villainId]
+    const card = v?.fateDeck.find(c => c.id === cardId)
+    if (card) return card
+  }
+  return null
+}
+
+// ─── FINE TURNO ─────────────────────────────────────────────
+
+/**
+ * Termina il turno corrente:
+ * 1. Pesca carte fino alla dimensione mano
+ * 2. Passa al giocatore successivo
+ * 3. Imposta phase = 'move'
+ */
+export function endTurn(state) {
+  const currentPlayer = getCurrentPlayer(state)
+
+  // Pesca
+  let newState = drawCards(state, currentPlayer.id)
+
+  // Passa al prossimo giocatore
+  const nextIndex = (state.currentPlayerIndex + 1) % state.players.length
+  newState = {
+    ...newState,
+    currentPlayerIndex: nextIndex,
+    phase: 'move',
+    actionQueue: [],
+    pendingFate: null,
+    pendingInteraction: null,
+  }
+
+  const nextPlayer = newState.players[nextIndex]
+  newState = addLog(newState, `Turno di ${nextPlayer.name}.`, 'system')
+  return newState
+}
+
+// ─── SETUP LOBBY / VILLAIN SELECT ────────────────────────────
+
+/**
+ * Crea lo state iniziale della lobby (prima della selezione villain).
+ */
+export function createLobbyState(hostPlayer) {
+  return {
+    status: 'lobby',
+    players: [hostPlayer],
+    log: [],
+    currentPlayerIndex: 0,
+    phase: null,
+    actionQueue: [],
+    pendingFate: null,
+    pendingInteraction: null,
+    winnerId: null,
+  }
+}
+
+/**
+ * Aggiunge un giocatore alla lobby.
+ */
+export function joinLobby(state, newPlayer) {
+  if (state.players.length >= 6) {
+    return { error: 'Lobby piena (max 6 giocatori).' }
+  }
+  const already = state.players.find(p => p.sessionId === newPlayer.sessionId)
+  if (already) return state // già dentro
+
+  const newState = {
+    ...state,
+    players: [...state.players, newPlayer],
+  }
+  return addLog(newState, `${newPlayer.name} si è unito alla partita.`, 'system')
+}
+
+/**
+ * Il giocatore seleziona il villain.
+ */
+export function selectVillain(state, playerId, villainId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+
+  // Villain già preso?
+  const taken = state.players.some(p => p.id !== playerId && p.villainId === villainId)
+  if (taken) return { error: 'Villain già scelto da un altro giocatore.' }
+
+  const newPlayers = deepClone(state.players)
+  newPlayers[pidx].villainId = villainId
+  newPlayers[pidx].isReady   = true
+
+  const villain = VILLAINS[villainId]
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${newPlayers[pidx].name} sceglie ${villain?.name || villainId}.`, 'system')
+  return newState
+}
+
+/**
+ * L'host avvia la partita (tutti devono aver scelto un villain).
+ */
+export function startGame(state) {
+  const notReady = state.players.filter(p => !p.villainId || !p.isReady)
+  if (notReady.length > 0) {
+    return { error: 'Non tutti i giocatori hanno scelto un villain.' }
+  }
+  if (state.players.length < 2) {
+    return { error: 'Servono almeno 2 giocatori.' }
+  }
+
+  return initializeGame(state.players)
+}
+
+// ─── EXPORT UTILS ────────────────────────────────────────────
+
+export default {
+  generateRoomCode,
+  generateId,
+  initializeGame,
+  createLobbyState,
+  joinLobby,
+  selectVillain,
+  startGame,
+  getCurrentPlayer,
+  getPlayerById,
+  getPlayerIndex,
+  getOpponents,
+  getLocationState,
+  getCardObjects,
+  checkWinCondition,
+  moveVillain,
+  completeAction,
+  gainPower,
+  removePower,
+  playVillainCard,
+  drawCards,
+  discardCard,
+  moveAllyOrItem,
+  vanquish,
+  startFate,
+  resolveFate,
+  placeFateCard,
+  endTurn,
+}

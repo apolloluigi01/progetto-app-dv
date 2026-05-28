@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 min-h-screen;
+    font-family: 'Lora', Georgia, serif;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Cinzel', 'Times New Roman', serif;
+  }
+
+  ::-webkit-scrollbar        { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track  { @apply bg-gray-900; }
+  ::-webkit-scrollbar-thumb  { @apply bg-gray-700 rounded; }
+}
+
+@layer components {
+  /* ── Carte ── */
+  .card-base {
+    @apply relative rounded-lg border border-gray-700 bg-gray-900
+           shadow-lg transition-all duration-150 cursor-pointer
+           hover:border-yellow-500/60 hover:shadow-yellow-900/20 hover:shadow-xl
+           select-none;
+  }
+  .card-playable {
+    @apply border-blue-500/60 shadow-blue-900/20;
+  }
+  .card-selected {
+    @apply border-yellow-400 shadow-yellow-400/30 shadow-xl -translate-y-1;
+  }
+
+  /* ── Bottoni ── */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2
+           font-display text-sm font-semibold tracking-wide
+           px-5 py-2.5 rounded-lg transition-all duration-150
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-yellow-600 text-gray-950 hover:bg-yellow-500 active:scale-95;
+  }
+  .btn-secondary {
+    @apply btn bg-gray-800 text-gray-200 border border-gray-600
+           hover:bg-gray-700 active:scale-95;
+  }
+  .btn-danger {
+    @apply btn bg-red-800 text-red-100 hover:bg-red-700 active:scale-95;
+  }
+  .btn-fate {
+    @apply btn bg-purple-800 text-purple-100 hover:bg-purple-700 active:scale-95;
+  }
+
+  /* ── Location ── */
+  .location-tile {
+    @apply relative rounded-xl border-2 border-gray-700 bg-gray-900/80
+           p-3 transition-all duration-200 min-h-[120px];
+  }
+  .location-active {
+    @apply border-yellow-500/70 bg-yellow-950/40;
+  }
+  .location-villain-here {
+    @apply border-yellow-400 shadow-yellow-400/20 shadow-lg;
+  }
+
+  /* ── Power badge ── */
+  .power-badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+           bg-yellow-600/20 border border-yellow-600/50 text-yellow-300
+           font-bold text-sm font-display;
+  }
+
+  /* ── Action icon ── */
+  .action-chip {
+    @apply inline-flex items-center justify-center
+           px-2 py-0.5 rounded text-xs font-bold font-display
+           border border-transparent;
+  }
+}
