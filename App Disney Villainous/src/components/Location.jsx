@@ -1,4 +1,4 @@
-import { VILLAINS, ACTION_LABELS, ACTION_COLORS, CARD_TYPE_LABELS } from '../data/villains.js'
+import { VILLAINS, ACTION_LABELS, ACTION_COLORS } from '../data/villains.js'
 
 const VILLAIN_EMOJI = {
   maleficent:      '🧙‍♀️',
@@ -13,42 +13,57 @@ export default function Location({
   villain,
   locationDef,
   locationState,
-  isVillainHere,
-  isActive,       // true se il villain è qui E è il tuo turno (puoi eseguire azioni)
-  actionQueue,    // array di azioni con { done, covered, index, type, value }
+  isVillainHere,  // il villain è attualmente posizionato qui
+  isActive,       // è il mio turno + sono qui + fase action
+  isStaged,       // luogo selezionato ma non ancora confermato (fase move)
+  isBlocked,      // luogo dell'ultimo turno — non selezionabile
+  actionQueue,
   isMyBoard,
-  onClick,        // click sul luogo (per spostamento)
-  onActionClick,  // click su un'azione (per eseguirla)
-  onCardInLocationClick: onCardClick,    // click su una carta nel luogo
+  onClick,
+  onActionClick,
 }) {
-  const allCards = [
-    ...villain.villainDeck,
-    ...villain.fateDeck,
-  ]
+  const allCards = [...villain.villainDeck, ...villain.fateDeck]
   const findCard = (id) => allCards.find(c => c.id === id)
+
+  // Classe bordo in base allo stato del luogo
+  const borderClass = isActive
+    ? 'border-green-500/70 bg-green-950/20'
+    : isStaged
+      ? 'border-yellow-400 bg-yellow-950/30 shadow-yellow-400/20 shadow-md'
+      : isVillainHere
+        ? 'border-yellow-600/50 bg-yellow-950/10'
+        : isBlocked
+          ? 'border-gray-800 opacity-40 cursor-not-allowed'
+          : onClick
+            ? 'border-gray-700 hover:border-gray-500 cursor-pointer hover:bg-gray-800/40'
+            : 'border-gray-800'
 
   return (
     <div
-      onClick={onClick}
-      className={[
-        'location-tile flex flex-col gap-2',
-        isVillainHere ? 'location-villain-here' : '',
-        isActive       ? 'location-active cursor-default' : onClick ? 'cursor-pointer hover:border-gray-500' : '',
-      ].join(' ')}
+      onClick={!isBlocked ? onClick : undefined}
+      className={`location-tile flex flex-col gap-2 transition-all duration-150 ${borderClass}`}
     >
-      {/* Nome luogo + villain indicator */}
+      {/* ── Nome luogo ── */}
       <div className="flex items-center justify-between gap-1">
         <h3 className="font-display text-xs font-bold text-gray-200 leading-tight">
           {locationDef.name}
         </h3>
-        {isVillainHere && (
-          <span className="text-lg leading-none" title="Il tuo villain è qui">
-            {VILLAIN_EMOJI[villain.id]}
-          </span>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {isStaged && (
+            <span className="text-[9px] text-yellow-400 font-display bg-yellow-950/60
+                             border border-yellow-700/50 px-1 rounded">
+              Selezionato
+            </span>
+          )}
+          {isVillainHere && (
+            <span className="text-base leading-none" title="Il tuo villain è qui">
+              {VILLAIN_EMOJI[villain.id]}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Azioni */}
+      {/* ── Chip azioni ── */}
       <div className="flex flex-wrap gap-1">
         {locationDef.actions.map((action, i) => {
           const qAction  = actionQueue?.find(a => a.index === i)
@@ -60,36 +75,40 @@ export default function Location({
           return (
             <button
               key={i}
-              onClick={(e) => {
-                e.stopPropagation()
-                onActionClick?.(i, action)
-              }}
+              onClick={(e) => { e.stopPropagation(); onActionClick?.(i, action) }}
               disabled={covered || done || !isActive || !onActionClick}
+              title={
+                covered ? 'Azione coperta da un Eroe' :
+                done    ? 'Completata' :
+                isActive ? `Esegui: ${label}` : label
+              }
               className={[
                 'action-chip text-white border transition-all text-[10px]',
-                covered ? 'opacity-30 line-through cursor-not-allowed bg-gray-800 border-gray-700' :
-                done    ? 'opacity-50 cursor-default ' + color + ' border-transparent' :
-                isActive && onActionClick ? color + ' border-transparent hover:opacity-90 cursor-pointer' :
-                color + ' border-transparent opacity-70',
+                covered
+                  ? 'opacity-30 line-through cursor-not-allowed bg-gray-800 border-gray-700'
+                  : done
+                    ? `opacity-50 cursor-default ${color} border-transparent`
+                    : isActive && onActionClick
+                      ? `${color} border-transparent hover:opacity-90 cursor-pointer ring-1 ring-white/10`
+                      : `${color} border-transparent opacity-70`,
               ].join(' ')}
-              title={covered ? 'Azione coperta da un Eroe' : done ? 'Azione completata' : label}
             >
-              {covered && '🔒 '}
-              {done && '✓ '}
+              {covered ? '🔒 ' : done ? '✓ ' : ''}
               {label}
             </button>
           )
         })}
       </div>
 
-      {/* Contenuto luogo: curse, wicket, allies, items, heroes */}
-      <div className="flex flex-wrap gap-1 mt-1">
+      {/* ── Contenuto luogo ── */}
+      <div className="flex flex-wrap gap-1 mt-0.5 min-h-[1rem]">
+
         {locationState.curses?.map(id => {
           const card = findCard(id)
           return (
-            <span key={id} onClick={(e) => { e.stopPropagation(); onCardClick?.(id) }}
+            <span key={id}
                   className="text-[9px] bg-indigo-900/60 border border-indigo-700/50 text-indigo-300
-                             px-1.5 py-0.5 rounded cursor-pointer hover:bg-indigo-800/60"
+                             px-1.5 py-0.5 rounded"
                   title={card?.effect || id}>
               🌑 {card?.name || id}
             </span>
@@ -99,9 +118,9 @@ export default function Location({
         {locationState.wickets?.map(id => {
           const card = findCard(id)
           return (
-            <span key={id} onClick={(e) => { e.stopPropagation(); onCardClick?.(id) }}
+            <span key={id}
                   className="text-[9px] bg-red-900/60 border border-red-700/50 text-red-300
-                             px-1.5 py-0.5 rounded cursor-pointer hover:bg-red-800/60"
+                             px-1.5 py-0.5 rounded"
                   title={card?.effect || id}>
               ⬤ {card?.name || id}
             </span>
@@ -111,9 +130,9 @@ export default function Location({
         {locationState.allies?.map(id => {
           const card = findCard(id)
           return (
-            <span key={id} onClick={(e) => { e.stopPropagation(); onCardClick?.(id) }}
+            <span key={id}
                   className="text-[9px] bg-blue-900/60 border border-blue-700/50 text-blue-300
-                             px-1.5 py-0.5 rounded cursor-pointer hover:bg-blue-800/60"
+                             px-1.5 py-0.5 rounded"
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               ⚔️ {card?.name || id} ({card?.strength ?? '?'})
             </span>
@@ -123,9 +142,9 @@ export default function Location({
         {locationState.items?.map(id => {
           const card = findCard(id)
           return (
-            <span key={id} onClick={(e) => { e.stopPropagation(); onCardClick?.(id) }}
+            <span key={id}
                   className="text-[9px] bg-amber-900/60 border border-amber-700/50 text-amber-300
-                             px-1.5 py-0.5 rounded cursor-pointer hover:bg-amber-800/60"
+                             px-1.5 py-0.5 rounded"
                   title={card?.effect || id}>
               📦 {card?.name || id}
             </span>
@@ -135,9 +154,9 @@ export default function Location({
         {locationState.heroes?.map(id => {
           const card = findCard(id)
           return (
-            <span key={id} onClick={(e) => { e.stopPropagation(); onCardClick?.(id) }}
+            <span key={id}
                   className="text-[9px] bg-emerald-900/60 border border-emerald-700/50 text-emerald-300
-                             px-1.5 py-0.5 rounded cursor-pointer hover:bg-emerald-800/60"
+                             px-1.5 py-0.5 rounded"
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               🛡️ {card?.name || id} ({card?.strength ?? '?'})
             </span>

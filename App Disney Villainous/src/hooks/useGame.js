@@ -28,7 +28,10 @@ export function useGame(roomCode) {
   const [myPlayerId, setMyPlayerId] = useState(null)
   const [loading, setLoading]       = useState(true)
   const [error, setError]           = useState(null)
-  const sessionId = useRef(getSessionId())
+  const sessionId    = useRef(getSessionId())
+  // Ref al game state aggiornato: evita stale closure in dispatch
+  // quando si concatenano più azioni nello stesso handler
+  const gameStateRef = useRef(null)
 
   // ── Carica partita da Supabase ──────────────────────────
   const fetchGame = useCallback(async () => {
@@ -55,6 +58,11 @@ export function useGame(roomCode) {
     setLoading(false)
   }, [roomCode])
 
+  // ── Sync ref ogni volta che lo state cambia ─────────────
+  useEffect(() => {
+    gameStateRef.current = gameState
+  }, [gameState])
+
   // ── Subscription Realtime ───────────────────────────────
   useEffect(() => {
     if (!roomCode) return
@@ -69,6 +77,8 @@ export function useGame(roomCode) {
         (payload) => {
           const newState = payload.new?.state
           if (newState) {
+            // Aggiorna il ref immediatamente oltre che lo state React
+            gameStateRef.current = newState
             setGameState(newState)
             const me = newState.players?.find(p => p.sessionId === sessionId.current)
             if (me && !myPlayerId) setMyPlayerId(me.id)
@@ -94,13 +104,20 @@ export function useGame(roomCode) {
   }, [gameId])
 
   // ── Helper: esegui un'azione engine + persist ───────────
+  // IMPORTANTE: usa gameStateRef.current (non gameState dalla closure)
+  // così chiamate concatenate nello stesso handler leggono sempre
+  // lo state più recente, senza aspettare il ciclo di render React.
   const dispatch = useCallback(async (fn, ...args) => {
-    if (!gameState) return { error: 'State non caricato.' }
-    const result = fn(gameState, ...args)
+    const current = gameStateRef.current
+    if (!current) return { error: 'State non caricato.' }
+    const result = fn(current, ...args)
     if (result?.error) return result
+    // Aggiorna il ref immediatamente: la prossima dispatch concatenata
+    // leggerà questo stato aggiornato senza aspettare il re-render
+    gameStateRef.current = result
     setGameState(result)
     return persistState(result)
-  }, [gameState, persistState])
+  }, [persistState])   // non dipende più da gameState → nessuna stale closure
 
   // ── Crea partita (host) ─────────────────────────────────
   const createGame = useCallback(async (playerName) => {

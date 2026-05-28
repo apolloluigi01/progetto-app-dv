@@ -9,7 +9,7 @@ const VILLAIN_EMOJI = {
   queen_of_hearts:'🃏',
 }
 
-export default function VillainSelect({ gameState, myPlayerId, isHost, onSelect, onStart, error }) {
+export default function VillainSelect({ gameState, myPlayerId, isHost, roomCode, onSelect, onStart, error }) {
   const takenVillains = gameState.players
     .filter(p => p.id !== myPlayerId && p.villainId)
     .map(p => p.villainId)
@@ -121,6 +121,30 @@ export default function VillainSelect({ gameState, myPlayerId, isHost, onSelect,
         <p className="mt-6 text-gray-600 text-sm">
           In attesa che l'host avvii la partita…
         </p>
+      )}
+
+      {/* ── Codice stanza condivisibile ── */}
+      {roomCode && (
+        <div className="mt-6 w-full max-w-4xl bg-gray-900 border border-gray-700 rounded-xl px-5 py-4
+                        flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div>
+            <p className="text-xs text-gray-500 font-display uppercase tracking-widest mb-1">
+              Codice Stanza — condividilo con il tuo avversario
+            </p>
+            <p className="font-display text-3xl font-black tracking-[0.3em] text-yellow-400 select-all">
+              {roomCode}
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              const joinUrl = `${window.location.origin}/game/${roomCode}?join=1&name=Giocatore`
+              navigator.clipboard?.writeText(joinUrl)
+            }}
+            className="btn-secondary text-xs px-4 py-2 shrink-0"
+          >
+            📋 Copia Link di Invito
+          </button>
+        </div>
       )}
     </div>
   )
