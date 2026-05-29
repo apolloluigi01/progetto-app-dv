@@ -23,7 +23,7 @@ function getSessionId() {
 }
 
 export function useGame(roomCode) {
-  const [gameState, setGameState]   = useState(null)
+  const [gameState, setGameState]   = useState(null) 
   const [gameId, setGameId]         = useState(null)
   const [myPlayerId, setMyPlayerId] = useState(null)
   const [loading, setLoading]       = useState(true)
