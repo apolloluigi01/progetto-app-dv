@@ -34,7 +34,7 @@ export function useGame(roomCode) {
   const gameStateRef = useRef(null)
 
   // ── Carica partita da Supabase ──────────────────────────
-  const fetchGame = useCallback(async () => {
+  const fetchGame = useCallback(async () => { 
     if (!roomCode) return
     const { data, error: err } = await supabase
       .from('games')
