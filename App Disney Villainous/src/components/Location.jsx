@@ -17,6 +17,7 @@ export default function Location({
   isActive,       // è il mio turno + sono qui + fase action
   isStaged,       // luogo selezionato ma non ancora confermato (fase move)
   isBlocked,      // luogo dell'ultimo turno — non selezionabile
+  isLocked,       // luogo bloccato — richiede unlockCard per accedere
   actionQueue,
   isMyBoard,
   onClick,
@@ -26,21 +27,23 @@ export default function Location({
   const findCard = (id) => allCards.find(c => c.id === id)
 
   // Classe bordo in base allo stato del luogo
-  const borderClass = isActive
-    ? 'border-green-500/70 bg-green-950/20'
-    : isStaged
-      ? 'border-yellow-400 bg-yellow-950/30 shadow-yellow-400/20 shadow-md'
-      : isVillainHere
-        ? 'border-yellow-600/50 bg-yellow-950/10'
-        : isBlocked
-          ? 'border-gray-800 opacity-40 cursor-not-allowed'
-          : onClick
-            ? 'border-gray-700 hover:border-gray-500 cursor-pointer hover:bg-gray-800/40'
-            : 'border-gray-800'
+  const borderClass = isLocked
+    ? 'border-gray-800 bg-gray-950/50 opacity-50 cursor-not-allowed'
+    : isActive
+      ? 'border-green-500/70 bg-green-950/20'
+      : isStaged
+        ? 'border-yellow-400 bg-yellow-950/30 shadow-yellow-400/20 shadow-md'
+        : isVillainHere
+          ? 'border-yellow-600/50 bg-yellow-950/10'
+          : isBlocked
+            ? 'border-gray-800 opacity-40 cursor-not-allowed'
+            : onClick
+              ? 'border-gray-700 hover:border-gray-500 cursor-pointer hover:bg-gray-800/40'
+              : 'border-gray-800'
 
   return (
     <div
-      onClick={!isBlocked ? onClick : undefined}
+      onClick={!isBlocked && !isLocked ? onClick : undefined}
       className={`location-tile flex flex-col gap-2 transition-all duration-150 ${borderClass}`}
     >
       {/* ── Nome luogo ── */}
@@ -49,6 +52,13 @@ export default function Location({
           {locationDef.name}
         </h3>
         <div className="flex items-center gap-1 shrink-0">
+          {isLocked && (
+            <span className="text-[9px] text-gray-500 font-display bg-gray-900/80
+                             border border-gray-700/50 px-1 rounded"
+                  title="Sblocca giocando la carta richiesta">
+              🔒
+            </span>
+          )}
           {isStaged && (
             <span className="text-[9px] text-yellow-400 font-display bg-yellow-950/60
                              border border-yellow-700/50 px-1 rounded">

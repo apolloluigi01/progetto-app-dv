@@ -79,6 +79,7 @@ export default function PlayerBoard({
           const isLocActive   = isActive && isVillainHere
           const isStaged      = isMyBoard && stagedLocation === i
           const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.lastLocation
+          const isLocked      = locState.isLocked === true
 
           return (
             <Location
@@ -90,11 +91,12 @@ export default function PlayerBoard({
               isActive={isLocActive}
               isStaged={isStaged}
               isBlocked={isBlocked}
+              isLocked={isLocked}
               actionQueue={isLocActive ? actionQueue : []}
               isMyBoard={isMyBoard}
               onClick={
-                // clickabile solo se: mia plancia + mio turno + fase move + non bloccato
-                isMyBoard && isMyTurn && phase === 'move' && !isBlocked
+                // clickabile solo se: mia plancia + mio turno + fase move + non bloccato + non locked
+                isMyBoard && isMyTurn && phase === 'move' && !isBlocked && !isLocked
                   ? () => onLocationClick?.(i)
                   : undefined
               }

@@ -65,6 +65,8 @@ export function initializeGame(players) {
         curses:              [],
         wickets:             [],
         coveredActionIndices: [],
+        // Luoghi bloccati (es. Caverna delle Meraviglie, Albero dell'Impiccato, Il Palazzo)
+        isLocked: loc.locked === true,
       }))
     }
 
@@ -158,18 +160,19 @@ export function checkWinCondition(state, playerId) {
       // Jafar: Lampada Magica nel Palazzo del Sultano E Genio Soggiogato
       const sultanLoc = player.board.locations.find(l => l.id === 'palazzo_sultano')
       if (!sultanLoc) return false
-      const hasLamp   = sultanLoc.items.includes('jaf_lampada')
+      const hasLamp   = sultanLoc.items.includes('jaf_o_lam')
       const genieSub  = player.genieSubjugated === true
       return hasLamp && genieSub
     }
     case 'defeat_peter_pan': {
-      // Uncino: Peter Pan sconfitto (panDefeated = true)
+      // Uncino: Peter Pan sconfitto alla Jolly Roger (panDefeated = true)
       return player.panDefeated === true
     }
     case 'trident_and_crown': {
-      // Ursula: possiede Tridente E Corona (in qualsiasi luogo o nella sua area)
-      const allItems = player.board.locations.flatMap(l => l.items)
-      return allItems.includes('urs_tridente') && allItems.includes('urs_corona')
+      // Ursula: Corona E Tridente al Covo di Ursula
+      const covoLoc = player.board.locations.find(l => l.id === 'covo_ursula')
+      if (!covoLoc) return false
+      return covoLoc.items.includes('urs_o_cor') && covoLoc.items.includes('urs_o_tri')
     }
     case 'twenty_power': {
       // Principe Giovanni: ≥ 20 Potere
@@ -204,6 +207,11 @@ export function moveVillain(state, playerId, locationIndex) {
   }
   if (locationIndex < 0 || locationIndex >= villain.locations.length) {
     return { error: 'Luogo non valido.' }
+  }
+  // Validazione: luogo bloccato — sblocca prima giocando la carta richiesta
+  if (player.board.locations[locationIndex].isLocked) {
+    const locDef = villain.locations[locationIndex]
+    return { error: `"${locDef.name}" è bloccato. Sblocca questo luogo giocando la carta richiesta.` }
   }
   if (state.phase !== 'move') {
     return { error: 'Non è il momento di muoversi.' }
@@ -368,9 +376,23 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
       np.villainDiscard.push(cardId)
   }
 
+  // Sblocca il luogo bloccato se questa carta è la unlockCard di quel luogo
+  villain.locations.forEach((locDef, li) => {
+    if (locDef.locked && locDef.unlockCard === cardId) {
+      np.board.locations[li].isLocked = false
+    }
+  })
+
   let newState = { ...state, players: newPlayers }
   const locName = villain.locations[targetLocIdx].name
   newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}".`, 'action')
+
+  // Se la carta ha sbloccato un luogo, logga l'evento
+  villain.locations.forEach((locDef, li) => {
+    if (locDef.locked && locDef.unlockCard === cardId) {
+      newState = addLog(newState, `🔓 "${locDef.name}" sbloccato!`, 'action')
+    }
+  })
 
   // Check win dopo ogni carta (es. Principe Giovanni guadagna potere da effetti)
   if (checkWinCondition(newState, playerId)) {
