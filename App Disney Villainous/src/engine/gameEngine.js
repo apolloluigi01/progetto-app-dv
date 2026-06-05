@@ -260,6 +260,18 @@ export function moveVillain(state, playerId, locationIndex) {
   const locName = villain.locations[locationIndex].name
   newState = addLog(newState, `${player.name} si sposta in "${locName}".`, 'move')
 
+  // ── Tic Tac: se Hook si sposta nel suo luogo, scarta tutta la mano ──
+  if (player.villainId === 'hook') {
+    const destLocState = newPlayers[pidx].board.locations[locationIndex]
+    if (destLocState.heroes.includes('fhk_tictac')) {
+      const discarded = newPlayers[pidx].hand
+      newPlayers[pidx].villainDiscard = [...newPlayers[pidx].villainDiscard, ...discarded]
+      newPlayers[pidx].hand = []
+      newState = { ...newState, players: newPlayers }
+      newState = addLog(newState, `⏰ Tic Tac è qui! Capitan Uncino deve scartare tutta la sua mano (${discarded.length} carte)!`, 'fate')
+    }
+  }
+
   // Check win condition all'inizio del turno (dopo move, prima delle azioni)
   if (checkWinCondition(newState, playerId)) {
     newState = {
@@ -448,6 +460,12 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
         : `🔓 Il Covo si sblocca — il Palazzo si blocca.`
       )
     }
+  }
+
+  // Hook: Degno Avversario → guadagna 3 Potere automaticamente
+  if (cardId === 'hk_e_deg_1' || cardId === 'hk_e_deg_2' || cardId === 'hk_e_deg_3') {
+    np.power += 3
+    specialLogs.push(`Degno Avversario: +3 Potere (tot: ${np.power}). Rivela carte dal tuo mazzo Fato finché trovi un Eroe.`)
   }
 
   // Regina di Cuori: Tirare → rivela 5 carte dal mazzo, vince se costo totale ≥ 8
@@ -709,6 +727,32 @@ export function startFate(state, playerId, targetPlayerId) {
   const drawn = target.fateDeck.splice(0, 2)
   if (drawn.length === 0) return { error: 'Il mazzo Fato dell\'avversario è vuoto.' }
 
+  const actor  = getPlayerById(state, playerId)
+  const targetP = getPlayerById(state, targetPlayerId)
+
+  // ── Meccanismo speciale Peter Pan ────────────────────────────
+  // Se Peter Pan viene rivelato tra le carte pescate, deve essere
+  // immediatamente giocato all'Albero dell'Impiccato (indice 3),
+  // anche se bloccato. L'altra carta viene scartata.
+  if (target.villainId === 'hook' && drawn.includes('fhk_peter')) {
+    const otherCard   = drawn.find(id => id !== 'fhk_peter')
+    const hangmanIdx  = 3  // L'Albero dell'Impiccato
+    const hookVillain = VILLAINS['hook']
+
+    target.board.locations[hangmanIdx].heroes.push('fhk_peter')
+    updateCoveredActions(target, hangmanIdx, hookVillain)
+    if (otherCard) target.fateDiscard.push(otherCard)
+
+    let newState = {
+      ...state,
+      players: newPlayers,
+      // Resta in fase 'action', non si va a fate_choice
+    }
+    newState = addLog(newState, `${actor?.name} usa Fato contro ${targetP?.name}!`, 'fate')
+    newState = addLog(newState, `⚡ Peter Pan rivelato! Va immediatamente all'Albero dell'Impiccato (anche se bloccato). Le altre carte vengono scartate.`, 'fate')
+    return newState
+  }
+
   let newState = {
     ...state,
     players: newPlayers,
@@ -720,8 +764,6 @@ export function startFate(state, playerId, targetPlayerId) {
     },
   }
 
-  const actor = getPlayerById(state, playerId)
-  const targetP = getPlayerById(state, targetPlayerId)
   newState = addLog(
     newState,
     `${actor?.name} usa Fato contro ${targetP?.name}! (pescate ${drawn.length} carte)`,
