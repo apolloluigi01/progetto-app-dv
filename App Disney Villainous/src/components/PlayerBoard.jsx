@@ -17,11 +17,13 @@ export default function PlayerBoard({
   isMyTurn,
   phase,
   actionQueue,
-  stagedLocation,     // indice luogo selezionato ma non ancora confermato (solo plancia mia)
-  selectedCardId,
-  onLocationClick,    // callback(idx) — Game.jsx gestisce setStagedLocation
+  stagedLocation,
+  activeMode,         // modalità UI corrente passata da Game.jsx
+  selectedCardId,     // carta evidenziata (per spostamento o scarto in attesa conferma)
+  onLocationClick,
   onActionClick,
   onHandCardClick,
+  onAllyItemClick,    // callback(cardId, fromLocIdx) — attivo in move_ally_pick
 }) {
   const villain = VILLAINS[player.villainId]
   if (!villain) return null
@@ -29,18 +31,24 @@ export default function PlayerBoard({
   const allCards = [...villain.villainDeck, ...villain.fateDeck]
   const findCard = (id) => allCards.find(c => c.id === id)
 
-  // Le azioni sono attive solo se: è la mia plancia, è il mio turno, siamo in fase action
   const isActive = isMyBoard && isMyTurn && phase === 'action'
+
+  function isLocClickable(i, locState) {
+    if (!onLocationClick) return false
+    if (locState.isLocked) return false
+    if (!isMyBoard) return true // plancia avversario con fate_resolve
+    if (phase === 'move') return i !== player.lastLocation
+    if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
+    return false
+  }
 
   return (
     <div className={[
       'rounded-2xl border-2 p-4 flex flex-col gap-4',
-      isMyBoard
-        ? 'border-yellow-600/40 bg-gray-900/60'
-        : 'border-gray-800 bg-gray-900/30',
+      isMyBoard ? 'border-yellow-600/40 bg-gray-900/60' : 'border-gray-800 bg-gray-900/30',
     ].join(' ')}>
 
-      {/* ── Header: villain + stats ── */}
+      {/* ── Header ── */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="text-2xl">{VILLAIN_EMOJI[player.villainId]}</span>
@@ -50,12 +58,9 @@ export default function PlayerBoard({
           </div>
           {isMyBoard && (
             <span className="text-[10px] bg-yellow-950 text-yellow-400 border border-yellow-700
-                             px-2 py-0.5 rounded-full font-display">
-              Tu
-            </span>
+                             px-2 py-0.5 rounded-full font-display">Tu</span>
           )}
         </div>
-
         <div className="flex items-center gap-3 text-sm shrink-0">
           <span className="power-badge">⚡ {player.power}</span>
           <div className="text-gray-600 text-xs text-right hidden sm:block">
@@ -71,7 +76,7 @@ export default function PlayerBoard({
         <span className="text-gray-400">{villain.winCondition}</span>
       </div>
 
-      {/* ── Plancia: 4 luoghi ── */}
+      {/* ── Luoghi ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         {villain.locations.map((locDef, i) => {
           const locState      = player.board.locations[i]
@@ -80,6 +85,11 @@ export default function PlayerBoard({
           const isStaged      = isMyBoard && stagedLocation === i
           const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.lastLocation
           const isLocked      = locState.isLocked === true
+          const clickable     = isLocClickable(i, locState)
+
+          // In move_ally_pick: evidenzia luoghi con alleati/oggetti
+          const highlightMovable = isMyBoard && activeMode === 'move_ally_pick' &&
+            (locState.allies.length > 0 || locState.items.length > 0)
 
           return (
             <Location
@@ -92,18 +102,13 @@ export default function PlayerBoard({
               isStaged={isStaged}
               isBlocked={isBlocked}
               isLocked={isLocked}
+              highlightMovable={highlightMovable}
               actionQueue={isLocActive ? actionQueue : []}
               isMyBoard={isMyBoard}
-              onClick={
-                // Mia plancia: cliccabile in fase move
-                (isMyBoard && isMyTurn && phase === 'move' && !isBlocked && !isLocked)
-                  ? () => onLocationClick?.(i)
-                  // Plancia avversaria: cliccabile se onLocationClick è fornito (es. fate_resolve)
-                  : (!isMyBoard && !isLocked && onLocationClick)
-                    ? () => onLocationClick?.(i)
-                    : undefined
-              }
+              selectedCardId={selectedCardId}
+              onClick={clickable ? () => onLocationClick?.(i) : undefined}
               onActionClick={isLocActive ? onActionClick : undefined}
+              onAllyItemClick={onAllyItemClick ? (cardId) => onAllyItemClick(cardId, i) : undefined}
             />
           )
         })}
@@ -115,7 +120,6 @@ export default function PlayerBoard({
           <p className="text-xs text-gray-600 font-display uppercase tracking-wider mb-2">
             La tua mano ({player.hand?.length ?? 0} carte)
           </p>
-
           {player.hand?.length === 0 ? (
             <p className="text-gray-700 text-xs italic">Nessuna carta in mano.</p>
           ) : (
@@ -124,17 +128,23 @@ export default function PlayerBoard({
                 const card = findCard(cardId)
                 if (!card) return null
 
-                const canPlay = isMyTurn && phase === 'action' &&
-                                actionQueue?.some(a => a.type === 'play_card' && !a.done && !a.covered)
-                const isSel   = selectedCardId === cardId
+                const isCondition = card.type === 'condition'
+
+                // Carta cliccabile se siamo in modalità play_card o discard_mode
+                const isClickable = isMyTurn && (activeMode === 'play_card' || activeMode === 'discard_mode')
+                // Le Condizioni sono sempre non cliccabili nel proprio turno
+                const effectivelyClickable = isClickable && !isCondition
+
+                const isSel = selectedCardId === cardId
 
                 return (
                   <Card
                     key={cardId}
                     card={card}
                     selected={isSel}
-                    playable={canPlay && !isSel}
-                    onClick={() => onHandCardClick?.(cardId)}
+                    playable={effectivelyClickable && !isSel}
+                    dimmed={isCondition && isMyTurn}
+                    onClick={effectivelyClickable ? () => onHandCardClick?.(cardId) : undefined}
                   />
                 )
               })}

@@ -208,6 +208,11 @@ export function useGame(roomCode) {
     return dispatch(engine.playVillainCard, myPlayerId, cardId, overrideLocationIndex)
   }, [dispatch, myPlayerId])
 
+  // ── Play Villain Card in luogo specifico ────────────────
+  const playCardToLocation = useCallback((cardId, locationIndex) => {
+    return dispatch(engine.playVillainCardToLocation, myPlayerId, cardId, locationIndex)
+  }, [dispatch, myPlayerId])
+
   // ── Discard Card ────────────────────────────────────────
   const discardCard = useCallback((cardId) => {
     return dispatch(engine.discardCard, myPlayerId, cardId)
@@ -239,6 +244,16 @@ export function useGame(roomCode) {
   // ── Complete/Skip Action ─────────────────────────────────
   const completeAction = useCallback((actionIndex) => {
     return dispatch(engine.completeAction, myPlayerId, actionIndex)
+  }, [dispatch, myPlayerId])
+
+  // ── Assegna Oggetto Fato a Eroe ──────────────────────────
+  const assignFateItem = useCallback((targetPlayerId, itemCardId, heroCardId) => {
+    return dispatch(engine.assignFateItem, targetPlayerId, itemCardId, heroCardId)
+  }, [dispatch])
+
+  // ── Gioca Condizione (fuori turno) ───────────────────────
+  const playCondition = useCallback((cardId) => {
+    return dispatch(engine.playCondition, myPlayerId, cardId)
   }, [dispatch, myPlayerId])
 
   // ── End Turn (manuale fallback) ──────────────────────────
@@ -281,12 +296,15 @@ export function useGame(roomCode) {
     gainPower,
     removePower,
     playCard,
+    playCardToLocation,
     discardCard,
     moveAllyOrItem,
     vanquish,
     startFate,
     resolveFate,
     placeFateCard,
+    assignFateItem,
+    playCondition,
     completeAction,
     endTurn,
     drawCards,

@@ -13,20 +13,22 @@ export default function Location({
   villain,
   locationDef,
   locationState,
-  isVillainHere,  // il villain è attualmente posizionato qui
-  isActive,       // è il mio turno + sono qui + fase action
-  isStaged,       // luogo selezionato ma non ancora confermato (fase move)
-  isBlocked,      // luogo dell'ultimo turno — non selezionabile
-  isLocked,       // luogo bloccato — richiede unlockCard per accedere
+  isVillainHere,
+  isActive,
+  isStaged,
+  isBlocked,
+  isLocked,
+  highlightMovable,   // evidenzia il luogo perché ha alleati/oggetti spostabili
   actionQueue,
   isMyBoard,
+  selectedCardId,     // id carta attualmente selezionata per spostamento
   onClick,
   onActionClick,
+  onAllyItemClick,    // callback(cardId) — clicca su alleato/oggetto per spostarlo
 }) {
   const allCards = [...villain.villainDeck, ...villain.fateDeck]
   const findCard = (id) => allCards.find(c => c.id === id)
 
-  // Classe bordo in base allo stato del luogo
   const borderClass = isLocked
     ? 'border-gray-800 bg-gray-950/50 opacity-50 cursor-not-allowed'
     : isActive
@@ -37,9 +39,11 @@ export default function Location({
           ? 'border-yellow-600/50 bg-yellow-950/10'
           : isBlocked
             ? 'border-gray-800 opacity-40 cursor-not-allowed'
-            : onClick
-              ? 'border-gray-700 hover:border-gray-500 cursor-pointer hover:bg-gray-800/40'
-              : 'border-gray-800'
+            : highlightMovable
+              ? 'border-blue-600/50 bg-blue-950/10 cursor-pointer'
+              : onClick
+                ? 'border-gray-700 hover:border-gray-500 cursor-pointer hover:bg-gray-800/40'
+                : 'border-gray-800'
 
   return (
     <div
@@ -54,8 +58,7 @@ export default function Location({
         <div className="flex items-center gap-1 shrink-0">
           {isLocked && (
             <span className="text-[9px] text-gray-500 font-display bg-gray-900/80
-                             border border-gray-700/50 px-1 rounded"
-                  title="Sblocca giocando la carta richiesta">
+                             border border-gray-700/50 px-1 rounded" title="Luogo bloccato">
               🔒
             </span>
           )}
@@ -63,6 +66,12 @@ export default function Location({
             <span className="text-[9px] text-yellow-400 font-display bg-yellow-950/60
                              border border-yellow-700/50 px-1 rounded">
               Selezionato
+            </span>
+          )}
+          {highlightMovable && !isStaged && (
+            <span className="text-[9px] text-blue-400 font-display bg-blue-950/60
+                             border border-blue-700/50 px-1 rounded">
+              Seleziona
             </span>
           )}
           {isVillainHere && (
@@ -138,11 +147,19 @@ export default function Location({
         })}
 
         {locationState.allies?.map(id => {
-          const card = findCard(id)
+          const card    = findCard(id)
+          const isSel   = selectedCardId === id
+          const clickable = !!onAllyItemClick
           return (
             <span key={id}
-                  className="text-[9px] bg-blue-900/60 border border-blue-700/50 text-blue-300
-                             px-1.5 py-0.5 rounded"
+                  onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
+                  className={[
+                    'text-[9px] px-1.5 py-0.5 rounded border transition-all',
+                    isSel
+                      ? 'bg-blue-600 border-blue-400 text-white ring-1 ring-blue-300'
+                      : 'bg-blue-900/60 border-blue-700/50 text-blue-300',
+                    clickable ? 'cursor-pointer hover:border-blue-400' : '',
+                  ].join(' ')}
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               ⚔️ {card?.name || id} ({card?.strength ?? '?'})
             </span>
@@ -150,11 +167,19 @@ export default function Location({
         })}
 
         {locationState.items?.map(id => {
-          const card = findCard(id)
+          const card    = findCard(id)
+          const isSel   = selectedCardId === id
+          const clickable = !!onAllyItemClick
           return (
             <span key={id}
-                  className="text-[9px] bg-amber-900/60 border border-amber-700/50 text-amber-300
-                             px-1.5 py-0.5 rounded"
+                  onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
+                  className={[
+                    'text-[9px] px-1.5 py-0.5 rounded border transition-all',
+                    isSel
+                      ? 'bg-amber-600 border-amber-400 text-white ring-1 ring-amber-300'
+                      : 'bg-amber-900/60 border-amber-700/50 text-amber-300',
+                    clickable ? 'cursor-pointer hover:border-amber-400' : '',
+                  ].join(' ')}
                   title={card?.effect || id}>
               📦 {card?.name || id}
             </span>
@@ -163,12 +188,20 @@ export default function Location({
 
         {locationState.heroes?.map(id => {
           const card = findCard(id)
+          // Mostra eventuali oggetti fato assegnati a questo eroe
+          const assignments = locationState.fateItemAssignments || {}
+          const assignedItems = Object.entries(assignments)
+            .filter(([, heroId]) => heroId === id)
+            .map(([itemId]) => findCard(itemId)?.name || itemId)
           return (
             <span key={id}
                   className="text-[9px] bg-emerald-900/60 border border-emerald-700/50 text-emerald-300
                              px-1.5 py-0.5 rounded"
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               🛡️ {card?.name || id} ({card?.strength ?? '?'})
+              {assignedItems.length > 0 && (
+                <span className="text-amber-400"> [+{assignedItems.join(', ')}]</span>
+              )}
             </span>
           )
         })}

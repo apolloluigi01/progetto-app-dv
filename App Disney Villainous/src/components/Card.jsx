@@ -4,6 +4,7 @@ export default function Card({
   card,
   selected   = false,
   playable   = false,
+  dimmed     = false,   // carta non selezionabile in questo contesto (es. Condizione nel proprio turno)
   small      = false,
   onClick,
   showEffect = true,
@@ -21,7 +22,7 @@ export default function Card({
         small  ? 'w-24 min-h-[6rem] p-2' : 'w-36 min-h-[10rem] p-3',
         selected  ? 'card-selected' : '',
         playable && !selected ? 'card-playable' : '',
-        onClick ? 'cursor-pointer' : 'cursor-default',
+        dimmed  ? 'opacity-40 cursor-not-allowed' : (onClick ? 'cursor-pointer' : 'cursor-default'),
       ].join(' ')}
     >
       {/* Header: tipo + costo */}

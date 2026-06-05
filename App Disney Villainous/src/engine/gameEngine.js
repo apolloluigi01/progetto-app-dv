@@ -31,6 +31,9 @@ function deepClone(obj) {
   return JSON.parse(JSON.stringify(obj))
 }
 
+// Potere iniziale per ordine di turno (0-indexed), valido da 2 a 6 giocatori
+const STARTING_POWER_TABLE = [0, 1, 2, 2, 3, 3]
+
 function addLog(state, message, type = 'info') {
   const entry = { id: generateId(), message, type, ts: Date.now() }
   return {
@@ -63,7 +66,7 @@ function updateCoveredActions(playerData, locationIndex, villain) {
  */
 export function initializeGame(players) {
   // players = [{ id, sessionId, name, villainId, isHost }]
-  const initializedPlayers = players.map((p) => {
+  const initializedPlayers = players.map((p, index) => {
     const villain = VILLAINS[p.villainId]
     if (!villain) throw new Error(`Villain sconosciuto: ${p.villainId}`)
 
@@ -75,13 +78,13 @@ export function initializeGame(players) {
     const board = {
       locations: villain.locations.map(loc => ({
         id: loc.id,
-        allies:              [],
-        items:               [],
-        heroes:              [],
-        curses:              [],
-        wickets:             [],
+        allies:               [],
+        items:                [],
+        heroes:               [],
+        curses:               [],
+        wickets:              [],
         coveredActionIndices: [],
-        // Luoghi bloccati (es. Caverna delle Meraviglie, Albero dell'Impiccato, Il Palazzo)
+        fateItemAssignments:  {}, // { [fateItemId]: heroId }
         isLocked: loc.locked === true,
       }))
     }
@@ -96,7 +99,7 @@ export function initializeGame(players) {
       name:            p.name,
       villainId:       p.villainId,
       isHost:          p.isHost,
-      power:           villain.startingPower,
+      power:           STARTING_POWER_TABLE[index] ?? 0,
       currentLocation: 0,
       lastLocation:    -1,
       hand,
@@ -272,7 +275,8 @@ export function moveVillain(state, playerId, locationIndex) {
 
 /**
  * Segna un'azione come completata (o saltata).
- * Il giocatore può saltare qualsiasi azione.
+ * La fine del turno NON scatta automaticamente: il giocatore deve dichiararla
+ * premendo "Fine Turno". Questo permette di attivare Condizioni prima della fine.
  */
 export function completeAction(state, playerId, actionIndex) {
   if (state.currentPlayerIndex !== getPlayerIndex(state, playerId)) {
@@ -283,15 +287,16 @@ export function completeAction(state, playerId, actionIndex) {
     a.index === actionIndex ? { ...a, done: true } : a
   )
 
-  let newState = { ...state, actionQueue: newQueue }
+  return { ...state, actionQueue: newQueue }
+}
 
-  // Se tutte le azioni sono done o coperte → end turn
-  const allDone = newQueue.every(a => a.done || a.covered)
-  if (allDone) {
-    newState = endTurn(newState)
-  }
-
-  return newState
+/**
+ * Gioca una carta villain in un luogo specifico (usato per Alleati/Oggetti
+ * che il giocatore vuole piazzare in un luogo a scelta).
+ * Richiama playVillainCard con overrideLocationIndex.
+ */
+export function playVillainCardToLocation(state, playerId, cardId, locationIndex) {
+  return playVillainCard(state, playerId, cardId, locationIndex)
 }
 
 /**
@@ -831,6 +836,80 @@ function findFateCard(state, cardId) {
   return null
 }
 
+// ─── ASSEGNAZIONE OGGETTI FATO ───────────────────────────────
+
+/**
+ * Assegna un oggetto Fato (fate_item) a un Eroe nello stesso luogo.
+ * L'assegnazione è memorizzata in board.locations[loc].fateItemAssignments.
+ */
+export function assignFateItem(state, targetPlayerId, itemCardId, heroCardId) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore non trovato.' }
+
+  const target  = state.players[tidx]
+  const villain = VILLAINS[target.villainId]
+
+  // Trova in quale luogo si trova l'item
+  let itemLocIdx = -1
+  for (let i = 0; i < target.board.locations.length; i++) {
+    if (target.board.locations[i].items.includes(itemCardId)) { itemLocIdx = i; break }
+  }
+  if (itemLocIdx < 0) return { error: 'Oggetto Fato non trovato nella plancia.' }
+
+  const loc = target.board.locations[itemLocIdx]
+  if (!loc.heroes.includes(heroCardId)) {
+    return { error: 'L\'Eroe non si trova nello stesso luogo dell\'Oggetto.' }
+  }
+
+  const newPlayers = deepClone(state.players)
+  const nLoc = newPlayers[tidx].board.locations[itemLocIdx]
+  if (!nLoc.fateItemAssignments) nLoc.fateItemAssignments = {}
+  nLoc.fateItemAssignments[itemCardId] = heroCardId
+
+  const itemCard = villain.fateDeck.find(c => c.id === itemCardId)
+  const heroCard = villain.fateDeck.find(c => c.id === heroCardId)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(
+    newState,
+    `"${itemCard?.name || itemCardId}" assegnato a "${heroCard?.name || heroCardId}".`,
+    'action'
+  )
+  return newState
+}
+
+// ─── CONDIZIONI ─────────────────────────────────────────────
+
+/**
+ * Gioca una carta Condizione dalla mano durante il turno di un avversario.
+ * Le Condizioni non si giocano come azione normale: si attivano fuori turno
+ * e poi tornano non selezionabili fino alla prossima volta che la trigger si verifica.
+ */
+export function playCondition(state, playerId, cardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+
+  // Non puoi giocare Condizioni durante il TUO turno
+  if (state.currentPlayerIndex === pidx) {
+    return { error: 'Le Condizioni si giocano solo durante il turno avversario.' }
+  }
+
+  const player  = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+  const card    = villain.villainDeck.find(c => c.id === cardId)
+  if (!card || card.type !== 'condition') return { error: 'Carta non è una Condizione.' }
+  if (!player.hand.includes(cardId))      return { error: 'Carta non in mano.' }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  np.hand = np.hand.filter(id => id !== cardId)
+  np.villainDiscard.push(cardId)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${player.name} attiva la Condizione "${card.name}"!`, 'action')
+  return newState
+}
+
 // ─── FINE TURNO ─────────────────────────────────────────────
 
 /**
@@ -967,6 +1046,7 @@ export default {
   gainPower,
   removePower,
   playVillainCard,
+  playVillainCardToLocation,
   drawCards,
   discardCard,
   moveAllyOrItem,
@@ -974,5 +1054,7 @@ export default {
   startFate,
   resolveFate,
   placeFateCard,
+  assignFateItem,
+  playCondition,
   endTurn,
 }
