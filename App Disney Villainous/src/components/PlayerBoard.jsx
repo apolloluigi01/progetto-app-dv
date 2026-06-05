@@ -95,10 +95,13 @@ export default function PlayerBoard({
               actionQueue={isLocActive ? actionQueue : []}
               isMyBoard={isMyBoard}
               onClick={
-                // clickabile solo se: mia plancia + mio turno + fase move + non bloccato + non locked
-                isMyBoard && isMyTurn && phase === 'move' && !isBlocked && !isLocked
+                // Mia plancia: cliccabile in fase move
+                (isMyBoard && isMyTurn && phase === 'move' && !isBlocked && !isLocked)
                   ? () => onLocationClick?.(i)
-                  : undefined
+                  // Plancia avversaria: cliccabile se onLocationClick è fornito (es. fate_resolve)
+                  : (!isMyBoard && !isLocked && onLocationClick)
+                    ? () => onLocationClick?.(i)
+                    : undefined
               }
               onActionClick={isLocActive ? onActionClick : undefined}
             />

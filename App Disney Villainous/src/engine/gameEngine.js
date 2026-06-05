@@ -39,6 +39,22 @@ function addLog(state, message, type = 'info') {
   }
 }
 
+// Ricalcola coveredActionIndices in base agli Eroi presenti in un luogo.
+// I luoghi con 4 azioni hanno top-row (indici 0,1) coperta dagli Eroi.
+// I luoghi con <4 azioni (es. Prigione) non hanno top-row e gli Eroi non coprono nulla.
+function updateCoveredActions(playerData, locationIndex, villain) {
+  const loc    = playerData.board.locations[locationIndex]
+  const locDef = villain.locations[locationIndex]
+  if (locDef.actions.length >= 4) {
+    if (loc.heroes.length > 0) {
+      if (!loc.coveredActionIndices.includes(0)) loc.coveredActionIndices.push(0)
+      if (!loc.coveredActionIndices.includes(1)) loc.coveredActionIndices.push(1)
+    } else {
+      loc.coveredActionIndices = loc.coveredActionIndices.filter(i => i !== 0 && i !== 1)
+    }
+  }
+}
+
 // ─── INIZIALIZZAZIONE ────────────────────────────────────────
 
 /**
@@ -179,8 +195,8 @@ export function checkWinCondition(state, playerId) {
       return player.power >= 20
     }
     case 'wicket_all_locations': {
-      // Regina di Cuori: 1 Wicket in ogni luogo
-      return player.board.locations.every(loc => loc.wickets.length > 0)
+      // Regina di Cuori: vince solo tramite la carta "Tirare" con successo
+      return player.queenWon === true
     }
     default:
       return false
@@ -377,25 +393,103 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   }
 
   // Sblocca il luogo bloccato se questa carta è la unlockCard di quel luogo
+  // Trasformazione di Ursula usa logica toggle separata — esclusa qui
+  const isTrasformazione = cardId === 'urs_e_tra_1' || cardId === 'urs_e_tra_2' || cardId === 'urs_e_tra_3'
   villain.locations.forEach((locDef, li) => {
-    if (locDef.locked && locDef.unlockCard === cardId) {
+    if (locDef.locked && locDef.unlockCard === cardId && !isTrasformazione) {
       np.board.locations[li].isLocked = false
     }
   })
+
+  // ── Effetti speciali per carte specifiche ──────────────────
+  const specialLogs = []
+  let specialGameOver = false
+  let specialWinnerId = null
+
+  // Jafar: Lampada Magica → trova il Genio nel mazzo Fato e lo posiziona qui
+  if (cardId === 'jaf_o_lam') {
+    const genieId = 'fjaf_genio'
+    const fateIdx = np.fateDeck.indexOf(genieId)
+    if (fateIdx >= 0) {
+      np.fateDeck.splice(fateIdx, 1)
+      np.board.locations[targetLocIdx].heroes.push(genieId)
+      updateCoveredActions(np, targetLocIdx, villain)
+      specialLogs.push(`Il Genio emerge dalla Lampada Magica!`)
+    }
+  }
+
+  // Ursula: Tridente → trova Re Tritone nel mazzo Fato e lo posiziona qui
+  if (cardId === 'urs_o_tri') {
+    const tritoneId = 'furs_tritone'
+    const fateIdx = np.fateDeck.indexOf(tritoneId)
+    if (fateIdx >= 0) {
+      np.fateDeck.splice(fateIdx, 1)
+      np.board.locations[targetLocIdx].heroes.push(tritoneId)
+      updateCoveredActions(np, targetLocIdx, villain)
+      specialLogs.push(`Re Tritone appare al ${villain.locations[targetLocIdx].name}!`)
+    }
+  }
+
+  // Ursula: Trasformazione → alterna il lucchetto tra Palazzo e Covo
+  if (isTrasformazione) {
+    const palazzoIdx = np.board.locations.findIndex(l => l.id === 'palazzo_eric')
+    const covoIdx    = np.board.locations.findIndex(l => l.id === 'covo_ursula')
+    if (palazzoIdx >= 0 && covoIdx >= 0) {
+      const wasLocked = np.board.locations[palazzoIdx].isLocked
+      np.board.locations[palazzoIdx].isLocked = !wasLocked
+      np.board.locations[covoIdx].isLocked    = wasLocked
+      specialLogs.push(wasLocked
+        ? `🔓 Il Palazzo si sblocca — il Covo si blocca.`
+        : `🔓 Il Covo si sblocca — il Palazzo si blocca.`
+      )
+    }
+  }
+
+  // Regina di Cuori: Tirare → rivela 5 carte dal mazzo, vince se costo totale ≥ 8
+  if (cardId === 'qh_e_tir_1' || cardId === 'qh_e_tir_2' || cardId === 'qh_e_tir_3') {
+    const hasAllWickets = np.board.locations.every(loc => loc.wickets.length > 0)
+    if (!hasAllWickets) {
+      specialLogs.push(`Tirare fallito: mancano Archetti in tutti i luoghi!`)
+    } else {
+      const count    = Math.min(5, np.villainDeck.length)
+      const revealed = np.villainDeck.splice(0, count)
+      const totalCost = revealed.reduce((sum, id) => {
+        const c = villain.villainDeck.find(x => x.id === id)
+        return sum + (c?.cost ?? 0)
+      }, 0)
+      const names = revealed.map(id => villain.villainDeck.find(c => c.id === id)?.name || id).join(', ')
+      specialLogs.push(`Tirare: [${names}] — costo totale: ${totalCost}.`)
+      if (totalCost >= 8) {
+        np.queenWon = true
+        specialGameOver = true
+        specialWinnerId = playerId
+        specialLogs.push(`🏆 Tirare riuscito! La Regina di Cuori ha vinto!`)
+      } else {
+        np.villainDeck = [...np.villainDeck, ...revealed]
+        specialLogs.push(`Tirare fallito (${totalCost} < 8). Le carte tornano in fondo al mazzo.`)
+      }
+    }
+  }
 
   let newState = { ...state, players: newPlayers }
   const locName = villain.locations[targetLocIdx].name
   newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}".`, 'action')
 
-  // Se la carta ha sbloccato un luogo, logga l'evento
+  for (const msg of specialLogs) {
+    newState = addLog(newState, msg, 'action')
+  }
+
+  // Logga sblocchi (esclusa Trasformazione già loggata sopra)
   villain.locations.forEach((locDef, li) => {
-    if (locDef.locked && locDef.unlockCard === cardId) {
+    if (locDef.locked && locDef.unlockCard === cardId && !isTrasformazione) {
       newState = addLog(newState, `🔓 "${locDef.name}" sbloccato!`, 'action')
     }
   })
 
-  // Check win dopo ogni carta (es. Principe Giovanni guadagna potere da effetti)
-  if (checkWinCondition(newState, playerId)) {
+  // Game over da Tirare o da normale win check
+  if (specialGameOver) {
+    newState = { ...newState, status: 'game_over', winnerId: specialWinnerId }
+  } else if (checkWinCondition(newState, playerId)) {
     newState = {
       ...newState,
       status: 'game_over',
@@ -558,14 +652,10 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
 
   // Rimuovi l'Eroe dal luogo
   nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
-
-  // Trova il proprietario dell'Eroe (chi lo ha giocato da Fato)
-  // → va nella fateDiscard del proprietario. Per semplicità andiamo nella fateDiscard del giocatore corrente.
   np.fateDiscard.push(heroCardId)
 
-  // Rimuovi coveredActions causate dall'Eroe (se presenti)
-  // (la UI può gestire questo mantenendo traccia di quale Eroe copre quale azione)
-  // Per ora rimuoviamo tutte le coveredActions nel luogo se l'eroe era l'unico a coprire
+  // Ricalcola copertura azioni: se non ci sono più Eroi, il top-row torna disponibile
+  updateCoveredActions(newPlayers[pidx], locIdx, villain)
 
   let newState = { ...state, players: newPlayers }
   const locName = villain.locations[locIdx].name
@@ -575,8 +665,8 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     'action'
   )
 
-  // Caso speciale: Peter Pan sconfitto sulla Jolly Roger
-  if (heroCardId === 'fhk_pan' && locIdx === 2) { // Jolly Roger = index 2
+  // Caso speciale: Peter Pan sconfitto sulla Jolly Roger (index 0)
+  if (heroCardId === 'fhk_peter' && locIdx === 0) {
     newPlayers[pidx].panDefeated = true
     if (checkWinCondition({ ...newState, players: newPlayers }, playerId)) {
       newState = {
@@ -697,12 +787,7 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
   switch (fateCard.type) {
     case 'hero':
       loc.heroes.push(cardId)
-      // Copre azioni se specificato
-      if (fateCard.coversAction !== null && fateCard.coversAction !== undefined) {
-        if (!loc.coveredActionIndices.includes(fateCard.coversAction)) {
-          loc.coveredActionIndices.push(fateCard.coversAction)
-        }
-      }
+      // La copertura top-row viene aggiornata automaticamente dopo lo switch
       break
     case 'fate_item':
       loc.items.push(cardId)
@@ -714,6 +799,12 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
   }
 
   const villain = VILLAINS[target.villainId]
+
+  // Aggiorna copertura top-row se è stato aggiunto un Eroe
+  if (fateCard.type === 'hero' && villain) {
+    updateCoveredActions(target, locationIndex, villain)
+  }
+
   const locName = villain?.locations[locationIndex]?.name || '?'
 
   let newState = {
@@ -767,6 +858,18 @@ export function endTurn(state) {
 
   const nextPlayer = newState.players[nextIndex]
   newState = addLog(newState, `Turno di ${nextPlayer.name}.`, 'system')
+
+  // Verifica condizione di vittoria all'INIZIO del turno del prossimo giocatore
+  // (prima che si muova — timing corretto per Malefica, Regina di Cuori, ecc.)
+  if (checkWinCondition(newState, nextPlayer.id)) {
+    newState = {
+      ...newState,
+      status: 'game_over',
+      winnerId: nextPlayer.id,
+    }
+    newState = addLog(newState, `🏆 ${nextPlayer.name} ha vinto!`, 'win')
+  }
+
   return newState
 }
 

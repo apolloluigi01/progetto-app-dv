@@ -595,7 +595,6 @@ const ursula = {
     {
       id: 'palazzo_eric', name: 'Il Palazzo', index: 3,
       locked: true,
-      unlockCard: 'urs_e_tra_1',
       actions: [
         { type: 'move' },
         { type: 'fate' },

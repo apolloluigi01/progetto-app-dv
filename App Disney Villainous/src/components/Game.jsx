@@ -30,9 +30,9 @@ export default function Game() {
   const [actionError,    setActionError]    = useState(null)
   const [selectedCardId, setSelectedCardId] = useState(null)
   const [uiMsg,          setUiMsg]          = useState(null)
-  // Spostamento staged: il giocatore sceglie il luogo ma
-  // non sposta il villain finché non preme "Conferma"
   const [stagedLocation, setStagedLocation] = useState(null)
+  // Selezione target Fato in partite con 3+ giocatori
+  const [fateTargetPendingActionIndex, setFateTargetPendingActionIndex] = useState(null)
 
   const isJoining = searchParams.get('join') === '1'
   const joinName  = searchParams.get('name') || ''
@@ -160,10 +160,14 @@ export default function Game() {
       }
 
     } else if (action.type === 'fate') {
-      const opp = opponents[0]
-      if (opp) {
-        await exec(startFate, opp.id)
+      if (opponents.length === 0) {
+        setActionError('Nessun avversario disponibile.')
+      } else if (opponents.length === 1) {
+        await exec(startFate, opponents[0].id)
         await exec(completeAction, actionIndex)
+      } else {
+        // 3+ giocatori: mostra selezione target
+        setFateTargetPendingActionIndex(actionIndex)
       }
 
     } else if (action.type === 'activate') {
@@ -178,17 +182,48 @@ export default function Game() {
       setUiMsg('Sconfiggi: seleziona un Eroe e gli alleati da usare.')
       await exec(completeAction, actionIndex)
 
+    } else if (action.type === 'move_hero') {
+      setUiMsg('Muovi Eroe: sposta un Eroe nella plancia avversaria in un luogo adiacente.')
+      await exec(completeAction, actionIndex)
+
     } else {
       await exec(completeAction, actionIndex)
     }
   }
 
-  // ── Handler: Fate choice ─────────────────────────────────
+  // ── Handler: selezione target Fato (multiplayer) ─────────
+  async function handleSelectFateTarget(targetPlayerId) {
+    const idx = fateTargetPendingActionIndex
+    setFateTargetPendingActionIndex(null)
+    await exec(startFate, targetPlayerId)
+    await exec(completeAction, idx)
+  }
+
+  // ── Handler: Fate choice — sceglie quale carta giocare ───
   async function handleFateChoice(cardId) {
     if (!gameState.pendingFate) return
     const { targetPlayerId } = gameState.pendingFate
+
+    // Determina il tipo della carta scelta
+    const targetP  = gameState.players.find(p => p.id === targetPlayerId)
+    const tVillain = targetP ? VILLAINS[targetP.villainId] : null
+    const card     = tVillain?.fateDeck.find(c => c.id === cardId)
+
     await exec(resolveFate, cardId)
-    await exec(placeFateCard, cardId, targetPlayerId, 0)
+
+    // Effetti Fato non richiedono scelta del luogo → piazza subito
+    if (card?.type === 'fate_effect') {
+      await exec(placeFateCard, cardId, targetPlayerId, 0)
+    }
+    // Hero e fate_item: lo stato passa a fate_resolve, il giocatore
+    // clicca sul luogo avversario per confermare il posizionamento
+  }
+
+  // ── Handler: posiziona carta Fato sul luogo scelto ───────
+  async function handlePlaceFateCard(locationIndex) {
+    const pi = gameState.pendingInteraction
+    if (!pi || pi.type !== 'place_fate_card') return
+    await exec(placeFateCard, pi.cardId, pi.targetPlayerId, locationIndex)
   }
 
   // ── Messaggio stato turno ─────────────────────────────────
@@ -204,6 +239,13 @@ export default function Game() {
     }
     if (phase === 'action') return { text: '⚡ Esegui le azioni disponibili nel tuo luogo corrente.', cls: 'border-green-700/30 bg-green-950/20 text-green-400' }
     if (phase === 'fate_choice') return { text: '🔮 Scegli una carta Fato da giocare.', cls: 'border-purple-700/30 bg-purple-950/20 text-purple-400' }
+    if (phase === 'fate_resolve') {
+      const pi   = gameState.pendingInteraction
+      const tP   = pi ? gameState.players.find(p => p.id === pi.targetPlayerId) : null
+      const tV   = tP ? VILLAINS[tP.villainId] : null
+      const card = tV?.fateDeck.find(c => c.id === pi?.cardId)
+      return { text: `🔮 Scegli dove posizionare "${card?.name || '?'}" sulla plancia di ${tP?.name || 'avversario'}.`, cls: 'border-purple-700/30 bg-purple-950/20 text-purple-400' }
+    }
     return null
   }
 
@@ -265,18 +307,26 @@ export default function Game() {
                 Nessun avversario ancora connesso.
               </p>
             )}
-            {opponents.map(opp => (
-              <PlayerBoard
-                key={opp.id}
-                player={opp}
-                isMyBoard={false}
-                isMyTurn={false}
-                phase={phase}
-                actionQueue={[]}
-                stagedLocation={null}
-                selectedCardId={null}
-              />
-            ))}
+            {opponents.map(opp => {
+              const isFateTarget =
+                isMyTurn &&
+                phase === 'fate_resolve' &&
+                gameState.pendingInteraction?.type === 'place_fate_card' &&
+                gameState.pendingInteraction?.targetPlayerId === opp.id
+              return (
+                <PlayerBoard
+                  key={opp.id}
+                  player={opp}
+                  isMyBoard={false}
+                  isMyTurn={false}
+                  phase={phase}
+                  actionQueue={[]}
+                  stagedLocation={null}
+                  selectedCardId={null}
+                  onLocationClick={isFateTarget ? handlePlaceFateCard : undefined}
+                />
+              )
+            })}
           </section>
 
           {/* ── SEPARATORE ── */}
@@ -342,6 +392,30 @@ export default function Game() {
                 onActionClick={isMyTurn && phase === 'action' ? handleActionClick : undefined}
                 onHandCardClick={(id) => setSelectedCardId(prev => prev === id ? null : id)}
               />
+            </section>
+          )}
+
+          {/* ── Selezione target Fato (3+ giocatori) ── */}
+          {isMyTurn && fateTargetPendingActionIndex !== null && (
+            <section className="p-4 shrink-0">
+              <div className="bg-purple-950/40 border border-purple-700/50 rounded-xl p-4">
+                <h3 className="font-display text-purple-300 font-bold mb-3 text-sm">
+                  🔮 Scegli un avversario da colpire con il Fato
+                </h3>
+                <div className="flex gap-2 flex-wrap">
+                  {opponents.map(opp => (
+                    <button key={opp.id}
+                            onClick={() => handleSelectFateTarget(opp.id)}
+                            className="btn-fate text-xs px-4">
+                      {VILLAIN_EMOJI[opp.villainId] || '❓'} {opp.name}
+                    </button>
+                  ))}
+                  <button onClick={() => setFateTargetPendingActionIndex(null)}
+                          className="btn-secondary text-xs px-3">
+                    Annulla
+                  </button>
+                </div>
+              </div>
             </section>
           )}
 
