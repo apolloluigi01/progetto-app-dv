@@ -38,12 +38,15 @@ export default function Game() {
   //       | 'discard_mode' | 'move_ally_pick' | 'move_ally_dest'
   //       | 'move_ally_confirm' | 'vanquish_mode' | 'fate_target'
   //       | 'assign_fate_item' | 'assign_fate_item_confirm'
-  const [mode,          setMode]          = useState(null)
-  const [modeData,      setModeData]      = useState({})
+  const [mode,           setMode]           = useState(null)
+  const [modeData,       setModeData]       = useState({})
   const [stagedLocation, setStagedLocation] = useState(null)
-  const [actionError,   setActionError]   = useState(null)
-  const [uiMsg,         setUiMsg]         = useState(null)
-  const [conditionCard, setConditionCard] = useState(null) // carta condizione in attesa conferma
+  const [actionError,    setActionError]    = useState(null)
+  const [uiMsg,          setUiMsg]          = useState(null)
+  // Fato: carta selezionata in attesa di conferma prima di giocarla
+  const [fatePendingCard, setFatePendingCard] = useState(null)
+  // Condizioni: carta per cui si sta dichiarando il trigger
+  const [conditionDeclaring, setConditionDeclaring] = useState(null)
 
   const isJoining = searchParams.get('join') === '1'
   const joinName  = searchParams.get('name') || ''
@@ -55,7 +58,8 @@ export default function Game() {
     moveVillain, gainPower, playCard, playCardToLocation,
     discardCard, moveAllyOrItem, vanquish,
     startFate, resolveFate, placeFateCard,
-    assignFateItem, playCondition,
+    assignFateItem, declareConditionTrigger, playCondition,
+    requestUndo, respondUndo,
     completeAction, endTurn,
   } = useGame(roomCode)
 
@@ -76,7 +80,8 @@ export default function Game() {
     setStagedLocation(null)
     setActionError(null)
     setUiMsg(null)
-    setConditionCard(null)
+    setFatePendingCard(null)
+    setConditionDeclaring(null)
   }, [gameState?.currentPlayerIndex, gameState?.phase])
 
   async function exec(fn, ...args) {
@@ -337,11 +342,19 @@ export default function Game() {
     await exec(completeAction, actionIndex)
   }
 
-  async function handleFateChoice(cardId) {
-    if (!gameState.pendingFate) return
+  // Primo click su una carta Fato → mostra conferma
+  function handleFateCardClick(cardId) {
+    setFatePendingCard(cardId)
+  }
+
+  // Conferma: effettivamente gioca la carta Fato
+  async function handleConfirmFateCard() {
+    const cardId = fatePendingCard
+    if (!cardId || !gameState.pendingFate) return
     const { targetPlayerId } = gameState.pendingFate
-    const targetP  = gameState.players.find(p => p.id === targetPlayerId)
-    const card     = VILLAINS[targetP?.villainId]?.fateDeck.find(c => c.id === cardId)
+    const targetP = gameState.players.find(p => p.id === targetPlayerId)
+    const card    = VILLAINS[targetP?.villainId]?.fateDeck.find(c => c.id === cardId)
+    setFatePendingCard(null)
     await exec(resolveFate, cardId)
     if (card?.type === 'fate_effect') await exec(placeFateCard, cardId, targetPlayerId, 0)
   }
@@ -379,14 +392,16 @@ export default function Game() {
     resetMode()
   }
 
-  // ── Condizione fuori turno ────────────────────────────────
-  async function handlePlayCondition(cardId) {
-    if (conditionCard === cardId) {
-      const res = await exec(playCondition, cardId)
-      if (!res?.error) setConditionCard(null)
-    } else {
-      setConditionCard(cardId)
-    }
+  // ── Condizione fuori turno: step 1 — dichiara trigger ────
+  async function handleDeclareCondition(cardId) {
+    const res = await exec(declareConditionTrigger, cardId)
+    if (!res?.error) setConditionDeclaring(cardId)
+  }
+
+  // ── Condizione fuori turno: step 2 — attiva ───────────────
+  async function handleActivateCondition(cardId) {
+    const res = await exec(playCondition, cardId)
+    if (!res?.error) setConditionDeclaring(null)
   }
 
   // ── Banner stato turno ────────────────────────────────────
@@ -443,11 +458,19 @@ export default function Game() {
             {phase}
           </span>
         </div>
-        {isMyTurn && phase === 'action' && (
-          <button onClick={() => exec(endTurn)} className="btn-secondary text-xs px-3 py-1.5">
-            Fine Turno →
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {isMyTurn && gameState.undoSnapshot && !gameState.undoRequest && (
+            <button onClick={() => exec(requestUndo)}
+                    className="btn-secondary text-xs px-3 py-1.5 border-orange-700/50 text-orange-300 hover:border-orange-500">
+              ↩ Annulla
+            </button>
+          )}
+          {isMyTurn && phase === 'action' && (
+            <button onClick={() => exec(endTurn)} className="btn-secondary text-xs px-3 py-1.5">
+              Fine Turno →
+            </button>
+          )}
+        </div>
       </header>
 
       {/* ── Body ─────────────────────────────────────────── */}
@@ -459,6 +482,42 @@ export default function Game() {
           {/* Banner turno */}
           {turnMsg && (
             <div className={`px-4 py-2 text-sm border-b ${turnMsg.cls} shrink-0`}>{turnMsg.text}</div>
+          )}
+
+          {/* Banner: richiesta undo in attesa (visibile al richiedente) */}
+          {gameState.undoRequest && gameState.undoRequest.requestingPlayerId === myPlayerId && (
+            <div className="px-4 py-2 text-sm border-b border-orange-700/50 bg-orange-950/30 text-orange-300 shrink-0">
+              ↩ Richiesta di annullamento inviata — in attesa degli altri giocatori
+              ({gameState.undoRequest.approvals?.length ?? 0}/{gameState.undoRequest.required})
+            </div>
+          )}
+
+          {/* Modale: approvazione undo (visibile ai NON richiedenti) */}
+          {gameState.undoRequest &&
+           gameState.undoRequest.requestingPlayerId !== myPlayerId &&
+           !gameState.undoRequest.approvals?.includes(myPlayerId) &&
+           !gameState.undoRequest.denials?.includes(myPlayerId) && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+              <div className="bg-gray-900 border border-orange-700/50 rounded-2xl p-6 max-w-sm w-full mx-4
+                              flex flex-col gap-4 shadow-2xl">
+                <div className="text-3xl text-center">↩</div>
+                <h3 className="font-display text-orange-300 font-bold text-lg text-center">
+                  Annulla Ultima Giocata
+                </h3>
+                <p className="text-gray-300 text-sm text-center">
+                  <strong>{gameState.undoRequest.requestingPlayerName}</strong> vuole annullare l'ultima giocata.<br/>
+                  Sei d'accordo?
+                </p>
+                <div className="flex gap-3 justify-center">
+                  <button onClick={() => exec(respondUndo, false)} className="btn-secondary text-sm px-5">
+                    ✗ Rifiuta
+                  </button>
+                  <button onClick={() => exec(respondUndo, true)}  className="btn-primary text-sm px-5">
+                    ✓ Approva
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* ── Plance avversari ── */}
@@ -603,19 +662,36 @@ export default function Game() {
                 <h3 className="font-display text-purple-300 font-bold mb-3 text-sm">
                   🔮 Scegli 1 carta — l'altra torna allo scarto del Fato
                 </h3>
-                <div className="flex gap-3 flex-wrap">
-                  {gameState.pendingFate.cards.map(cardId => {
-                    const target  = gameState.players.find(p => p.id === gameState.pendingFate.targetPlayerId)
-                    const card    = VILLAINS[target?.villainId]?.fateDeck.find(c => c.id === cardId)
-                    if (!card) return null
-                    return (
-                      <div key={cardId} className="flex flex-col items-center gap-2">
-                        <Card card={card} onClick={() => handleFateChoice(cardId)} />
-                        <button onClick={() => handleFateChoice(cardId)} className="btn-fate text-xs px-4">Gioca questa</button>
-                      </div>
-                    )
-                  })}
-                </div>
+
+                {/* Conferma prima di giocare */}
+                {fatePendingCard ? (() => {
+                  const target = gameState.players.find(p => p.id === gameState.pendingFate.targetPlayerId)
+                  const card   = VILLAINS[target?.villainId]?.fateDeck.find(c => c.id === fatePendingCard)
+                  return (
+                    <ConfirmPanel
+                      message={`Confermi di giocare la carta "${card?.name || fatePendingCard}"?`}
+                      onConfirm={handleConfirmFateCard}
+                      onCancel={() => setFatePendingCard(null)}
+                      confirmLabel="✓ Gioca"
+                    />
+                  )
+                })() : (
+                  <div className="flex gap-3 flex-wrap">
+                    {gameState.pendingFate.cards.map(cardId => {
+                      const target = gameState.players.find(p => p.id === gameState.pendingFate.targetPlayerId)
+                      const card   = VILLAINS[target?.villainId]?.fateDeck.find(c => c.id === cardId)
+                      if (!card) return null
+                      return (
+                        <div key={cardId} className="flex flex-col items-center gap-2">
+                          <Card card={card} onClick={() => handleFateCardClick(cardId)} />
+                          <button onClick={() => handleFateCardClick(cardId)} className="btn-fate text-xs px-4">
+                            Gioca questa
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -667,19 +743,28 @@ export default function Game() {
                   🎴 Condizioni — turno di {currentPlayer?.name}
                 </h3>
                 <p className="text-[11px] text-rose-400 mb-3">
-                  Se la condizione si è verificata, puoi attivarla prima della fine del turno avversario.
+                  Verifica prima se la condizione si è verificata, poi attivala.
                 </p>
                 <div className="flex gap-3 flex-wrap">
-                  {myConditions.map(card => (
-                    <div key={card.id} className="flex flex-col items-center gap-1">
-                      <Card card={card} small onClick={() => handlePlayCondition(card.id)}
-                            selected={conditionCard === card.id} />
-                      {conditionCard === card.id && (
-                        <button onClick={() => handlePlayCondition(card.id)}
-                                className="btn-fate text-[10px] px-3 py-1">✓ Attiva ora</button>
-                      )}
-                    </div>
-                  ))}
+                  {myConditions.map(card => {
+                    const isTriggered = myPlayer?.conditionsTriggered?.includes(card.id)
+                    return (
+                      <div key={card.id} className="flex flex-col items-center gap-1">
+                        <Card card={card} small selected={conditionDeclaring === card.id || isTriggered} />
+                        {!isTriggered ? (
+                          <button onClick={() => handleDeclareCondition(card.id)}
+                                  className="btn-secondary text-[10px] px-3 py-1">
+                            📣 Dichiara Trigger
+                          </button>
+                        ) : (
+                          <button onClick={() => handleActivateCondition(card.id)}
+                                  className="btn-fate text-[10px] px-3 py-1">
+                            ✓ Attiva Condizione
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             </section>

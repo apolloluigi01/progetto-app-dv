@@ -882,32 +882,128 @@ export function assignFateItem(state, targetPlayerId, itemCardId, heroCardId) {
 
 /**
  * Gioca una carta Condizione dalla mano durante il turno di un avversario.
- * Le Condizioni non si giocano come azione normale: si attivano fuori turno
- * e poi tornano non selezionabili fino alla prossima volta che la trigger si verifica.
+ * Il giocatore deve dichiarare esplicitamente che il trigger si è verificato
+ * (il sistema non può verificarlo automaticamente — testo libero sulle carte).
+ * La condizione si resetta (non giocabile) a ogni fine turno: viene rimossa
+ * da conditionsTriggered quando il turno passa al giocatore successivo.
  */
-export function playCondition(state, playerId, cardId) {
+export function declareConditionTrigger(state, playerId, cardId) {
   const pidx = getPlayerIndex(state, playerId)
   if (pidx < 0) return { error: 'Giocatore non trovato.' }
-
-  // Non puoi giocare Condizioni durante il TUO turno
   if (state.currentPlayerIndex === pidx) {
-    return { error: 'Le Condizioni si giocano solo durante il turno avversario.' }
+    return { error: 'Le Condizioni si dichiarano solo durante il turno avversario.' }
   }
-
   const player  = state.players[pidx]
   const villain = VILLAINS[player.villainId]
   const card    = villain.villainDeck.find(c => c.id === cardId)
   if (!card || card.type !== 'condition') return { error: 'Carta non è una Condizione.' }
   if (!player.hand.includes(cardId))      return { error: 'Carta non in mano.' }
 
+  // Aggiunge la carta alla lista "trigger verificati in questo turno"
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  if (!np.conditionsTriggered) np.conditionsTriggered = []
+  if (!np.conditionsTriggered.includes(cardId)) np.conditionsTriggered.push(cardId)
+
+  let newState = { ...state, players: newPlayers }
+  const card2 = villain.villainDeck.find(c => c.id === cardId)
+  newState = addLog(newState, `${player.name} dichiara la Condizione "${card2?.name}" come attivata.`, 'action')
+  return newState
+}
+
+export function playCondition(state, playerId, cardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  if (state.currentPlayerIndex === pidx) {
+    return { error: 'Le Condizioni si giocano solo durante il turno avversario.' }
+  }
+  const player  = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+  const card    = villain.villainDeck.find(c => c.id === cardId)
+  if (!card || card.type !== 'condition') return { error: 'Carta non è una Condizione.' }
+  if (!player.hand.includes(cardId))      return { error: 'Carta non in mano.' }
+
+  // Può essere giocata solo se il trigger è stato dichiarato in questo turno
+  if (!player.conditionsTriggered?.includes(cardId)) {
+    return { error: 'Devi prima dichiarare che il trigger si è verificato.' }
+  }
+
   const newPlayers = deepClone(state.players)
   const np = newPlayers[pidx]
   np.hand = np.hand.filter(id => id !== cardId)
   np.villainDiscard.push(cardId)
+  np.conditionsTriggered = (np.conditionsTriggered || []).filter(id => id !== cardId)
 
   let newState = { ...state, players: newPlayers }
   newState = addLog(newState, `${player.name} attiva la Condizione "${card.name}"!`, 'action')
   return newState
+}
+
+// ─── UNDO (ANNULLA ULTIMA GIOCATA) ──────────────────────────
+
+/**
+ * Il giocatore richiede di annullare l'ultima giocata.
+ * Richiede l'approvazione di tutti gli altri giocatori.
+ */
+export function requestUndo(state, playerId) {
+  const player = getPlayerById(state, playerId)
+  if (!player) return { error: 'Giocatore non trovato.' }
+  if (!state.undoSnapshot) return { error: 'Nessuna giocata da annullare.' }
+  if (state.undoRequest)   return { error: 'Richiesta di annullamento già in corso.' }
+
+  const others = state.players.filter(p => p.id !== playerId)
+  let newState = {
+    ...state,
+    undoRequest: {
+      requestingPlayerId:   playerId,
+      requestingPlayerName: player.name,
+      approvals: [],
+      denials:   [],
+      required:  others.length,
+    },
+  }
+  newState = addLog(newState, `${player.name} chiede di annullare l'ultima giocata.`, 'system')
+  return newState
+}
+
+/**
+ * Un altro giocatore risponde alla richiesta di undo.
+ * Se tutti approvano → ripristina lo snapshot.
+ * Se anche uno solo nega → cancella la richiesta.
+ */
+export function respondUndo(state, playerId, approved) {
+  if (!state.undoRequest) return { error: 'Nessuna richiesta di annullamento in corso.' }
+  const { requestingPlayerId } = state.undoRequest
+  if (playerId === requestingPlayerId) {
+    return { error: 'Non puoi rispondere alla tua stessa richiesta.' }
+  }
+
+  const responder = getPlayerById(state, playerId)
+  const newRequest = deepClone(state.undoRequest)
+
+  if (approved) {
+    if (!newRequest.approvals.includes(playerId)) newRequest.approvals.push(playerId)
+  } else {
+    if (!newRequest.denials.includes(playerId)) newRequest.denials.push(playerId)
+  }
+
+  if (newRequest.denials.length > 0) {
+    let newState = { ...state, undoRequest: null }
+    newState = addLog(newState, `${responder?.name} ha rifiutato l'annullamento.`, 'system')
+    return newState
+  }
+
+  if (newRequest.approvals.length >= newRequest.required) {
+    const snapshot = state.undoSnapshot
+    if (!snapshot) return { error: 'Snapshot non disponibile.' }
+    const requester = getPlayerById(state, requestingPlayerId)
+    // Ripristina lo snapshot: rimuove i campi meta per evitare ricorsioni
+    let restoredState = { ...snapshot, undoRequest: null, undoSnapshot: null }
+    restoredState = addLog(restoredState, `✅ Ultima giocata di ${requester?.name} annullata.`, 'system')
+    return restoredState
+  }
+
+  return { ...state, undoRequest: newRequest }
 }
 
 // ─── FINE TURNO ─────────────────────────────────────────────
@@ -924,6 +1020,13 @@ export function endTurn(state) {
   // Pesca
   let newState = drawCards(state, currentPlayer.id)
 
+  // Resetta conditionsTriggered per tutti i giocatori (le condizioni non giocate si azzerano)
+  const resetPlayers = newState.players.map(p => ({
+    ...p,
+    conditionsTriggered: [],
+  }))
+  newState = { ...newState, players: resetPlayers }
+
   // Passa al prossimo giocatore
   const nextIndex = (state.currentPlayerIndex + 1) % state.players.length
   newState = {
@@ -933,13 +1036,14 @@ export function endTurn(state) {
     actionQueue: [],
     pendingFate: null,
     pendingInteraction: null,
+    undoRequest: null,
+    undoSnapshot: null, // resetta snapshot a ogni cambio di turno
   }
 
   const nextPlayer = newState.players[nextIndex]
   newState = addLog(newState, `Turno di ${nextPlayer.name}.`, 'system')
 
   // Verifica condizione di vittoria all'INIZIO del turno del prossimo giocatore
-  // (prima che si muova — timing corretto per Malefica, Regina di Cuori, ecc.)
   if (checkWinCondition(newState, nextPlayer.id)) {
     newState = {
       ...newState,
@@ -1055,6 +1159,9 @@ export default {
   resolveFate,
   placeFateCard,
   assignFateItem,
+  declareConditionTrigger,
   playCondition,
+  requestUndo,
+  respondUndo,
   endTurn,
 }

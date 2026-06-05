@@ -104,20 +104,22 @@ export function useGame(roomCode) {
   }, [gameId])
 
   // ── Helper: esegui un'azione engine + persist ───────────
-  // IMPORTANTE: usa gameStateRef.current (non gameState dalla closure)
-  // così chiamate concatenate nello stesso handler leggono sempre
-  // lo state più recente, senza aspettare il ciclo di render React.
   const dispatch = useCallback(async (fn, ...args) => {
     const current = gameStateRef.current
     if (!current) return { error: 'State non caricato.' }
-    const result = fn(current, ...args)
+
+    // Salva snapshot prima di ogni azione (escluse le meta-azioni undo/respond)
+    const isMetaAction = fn === engine.requestUndo || fn === engine.respondUndo
+    const withSnapshot = isMetaAction
+      ? current
+      : { ...current, undoSnapshot: current.undoSnapshot ?? current }
+
+    const result = fn(withSnapshot, ...args)
     if (result?.error) return result
-    // Aggiorna il ref immediatamente: la prossima dispatch concatenata
-    // leggerà questo stato aggiornato senza aspettare il re-render
     gameStateRef.current = result
     setGameState(result)
     return persistState(result)
-  }, [persistState])   // non dipende più da gameState → nessuna stale closure
+  }, [persistState])
 
   // ── Crea partita (host) ─────────────────────────────────
   const createGame = useCallback(async (playerName) => {
@@ -251,9 +253,22 @@ export function useGame(roomCode) {
     return dispatch(engine.assignFateItem, targetPlayerId, itemCardId, heroCardId)
   }, [dispatch])
 
-  // ── Gioca Condizione (fuori turno) ───────────────────────
+  // ── Condizioni ───────────────────────────────────────────
+  const declareConditionTrigger = useCallback((cardId) => {
+    return dispatch(engine.declareConditionTrigger, myPlayerId, cardId)
+  }, [dispatch, myPlayerId])
+
   const playCondition = useCallback((cardId) => {
     return dispatch(engine.playCondition, myPlayerId, cardId)
+  }, [dispatch, myPlayerId])
+
+  // ── Undo ─────────────────────────────────────────────────
+  const requestUndo = useCallback(() => {
+    return dispatch(engine.requestUndo, myPlayerId)
+  }, [dispatch, myPlayerId])
+
+  const respondUndo = useCallback((approved) => {
+    return dispatch(engine.respondUndo, myPlayerId, approved)
   }, [dispatch, myPlayerId])
 
   // ── End Turn (manuale fallback) ──────────────────────────
@@ -304,7 +319,10 @@ export function useGame(roomCode) {
     resolveFate,
     placeFateCard,
     assignFateItem,
+    declareConditionTrigger,
     playCondition,
+    requestUndo,
+    respondUndo,
     completeAction,
     endTurn,
     drawCards,
