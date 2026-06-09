@@ -220,9 +220,9 @@ export function moveVillain(state, playerId, locationIndex) {
   const player = state.players[pidx]
   const villain = VILLAINS[player.villainId]
 
-  // Validazione: non puoi restare fermo
-  if (locationIndex === player.lastLocation) {
-    return { error: 'Non puoi tornare nello stesso luogo del turno precedente.' }
+  // Validazione: non puoi restare nel luogo in cui ti trovi
+  if (locationIndex === player.currentLocation) {
+    return { error: 'Non puoi restare nel luogo in cui ti trovi già.' }
   }
   if (locationIndex < 0 || locationIndex >= villain.locations.length) {
     return { error: 'Luogo non valido.' }
@@ -633,18 +633,24 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
 
   const player = state.players[pidx]
   const villain = VILLAINS[player.villainId]
-  const locIdx = player.currentLocation
-  const loc = player.board.locations[locIdx]
 
-  // Verifica che l'Eroe sia nel luogo corrente
-  if (!loc.heroes.includes(heroCardId)) {
-    return { error: 'L\'Eroe non è nel tuo luogo corrente.' }
+  // Cerca l'Eroe in qualsiasi luogo del Reame
+  let heroLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].heroes.includes(heroCardId)) {
+      heroLocIdx = i
+      break
+    }
+  }
+  if (heroLocIdx < 0) {
+    return { error: 'L\'Eroe non è presente nel tuo Reame.' }
   }
 
-  // Verifica che tutti gli alleati siano nel luogo corrente
+  // Verifica che tutti gli alleati esistano in qualsiasi luogo del Reame
   for (const allyId of allyCardIds) {
-    if (!loc.allies.includes(allyId)) {
-      return { error: `L\'Alleato ${allyId} non è nel tuo luogo corrente.` }
+    const found = player.board.locations.some(loc => loc.allies.includes(allyId))
+    if (!found) {
+      return { error: `L\'Alleato ${allyId} non è presente nel tuo Reame.` }
     }
   }
 
@@ -671,17 +677,17 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
 
   const newPlayers = deepClone(state.players)
   const np = newPlayers[pidx]
-  const nloc = np.board.locations[locIdx]
+  const nloc = np.board.locations[heroLocIdx]
 
-  // Rimuovi l'Eroe dal luogo
+  // Rimuovi l'Eroe dal luogo in cui si trovava
   nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
 
-  // Ricalcola copertura azioni: se non ci sono più Eroi, il top-row torna disponibile
-  updateCoveredActions(newPlayers[pidx], locIdx, villain)
+  // Ricalcola copertura azioni per il luogo da cui è stato rimosso l'Eroe
+  updateCoveredActions(newPlayers[pidx], heroLocIdx, villain)
 
   let newState = { ...state, players: newPlayers }
-  const locName = villain.locations[locIdx].name
+  const locName = villain.locations[heroLocIdx].name
   newState = addLog(
     newState,
     `${player.name} sconfigge "${heroCard?.name || heroCardId}" in "${locName}" (forza alleati: ${totalAllyStrength} vs ${heroStrength}).`,
@@ -689,7 +695,7 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
   )
 
   // Caso speciale: Peter Pan sconfitto sulla Jolly Roger (index 0)
-  if (heroCardId === 'fhk_peter' && locIdx === 0) {
+  if (heroCardId === 'fhk_peter' && heroLocIdx === 0) {
     newPlayers[pidx].panDefeated = true
     if (checkWinCondition({ ...newState, players: newPlayers }, playerId)) {
       newState = {
