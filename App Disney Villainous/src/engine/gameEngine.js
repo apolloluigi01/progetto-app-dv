@@ -440,15 +440,57 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
     }
   }
 
-  // Ursula: Tridente → trova Re Tritone nel mazzo Fato e lo posiziona qui
+  // Ursula: Tridente → trova Re Tritone (mazzo, scarto o già in campo) e lo posiziona qui
   if (cardId === 'urs_o_tri') {
     const tritoneId = 'furs_tritone'
-    const fateIdx = np.fateDeck.indexOf(tritoneId)
-    if (fateIdx >= 0) {
-      np.fateDeck.splice(fateIdx, 1)
+    let tritoneFound = false
+
+    // 1. Cerca nel mazzo Fato
+    const deckIdx = np.fateDeck.indexOf(tritoneId)
+    if (deckIdx >= 0) {
+      np.fateDeck.splice(deckIdx, 1)
       np.board.locations[targetLocIdx].heroes.push(tritoneId)
       updateCoveredActions(np, targetLocIdx, villain)
-      specialLogs.push(`Re Tritone appare al ${villain.locations[targetLocIdx].name}!`)
+      specialLogs.push(`Re Tritone trovato nel mazzo Fato e posizionato al ${villain.locations[targetLocIdx].name}!`)
+      tritoneFound = true
+    }
+
+    // 2. Cerca nello scarto Fato
+    if (!tritoneFound) {
+      const discardIdx = np.fateDiscard.indexOf(tritoneId)
+      if (discardIdx >= 0) {
+        np.fateDiscard.splice(discardIdx, 1)
+        np.board.locations[targetLocIdx].heroes.push(tritoneId)
+        updateCoveredActions(np, targetLocIdx, villain)
+        specialLogs.push(`Re Tritone trovato nello scarto Fato e posizionato al ${villain.locations[targetLocIdx].name}!`)
+        tritoneFound = true
+      }
+    }
+
+    // 3. Già in campo → spostalo al luogo del Tridente e scarta i suoi oggetti assegnati
+    if (!tritoneFound) {
+      for (let li = 0; li < np.board.locations.length; li++) {
+        const heroIdx = np.board.locations[li].heroes.indexOf(tritoneId)
+        if (heroIdx >= 0) {
+          np.board.locations[li].heroes.splice(heroIdx, 1)
+          updateCoveredActions(np, li, villain)
+          // Scarta tutti gli Oggetti Fato assegnati a Tritone in quel luogo
+          const assignments = np.board.locations[li].fateItemAssignments || {}
+          for (const [itemId, assignedHeroId] of Object.entries(assignments)) {
+            if (assignedHeroId === tritoneId) {
+              const itemIdx = np.board.locations[li].items.indexOf(itemId)
+              if (itemIdx >= 0) np.board.locations[li].items.splice(itemIdx, 1)
+              delete np.board.locations[li].fateItemAssignments[itemId]
+              np.fateDiscard.push(itemId)
+            }
+          }
+          np.board.locations[targetLocIdx].heroes.push(tritoneId)
+          updateCoveredActions(np, targetLocIdx, villain)
+          specialLogs.push(`Re Tritone era in campo ed è stato spostato al ${villain.locations[targetLocIdx].name}! Tutti i suoi oggetti assegnati sono stati scartati.`)
+          tritoneFound = true
+          break
+        }
+      }
     }
   }
 
