@@ -374,16 +374,21 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   // Rimuovi dalla mano
   np.hand = np.hand.filter(id => id !== cardId)
 
-  // Determina dove va la carta
+  // Determina dove va la carta.
+  // Se l'UI ha passato una scelta esplicita, la rispettiamo sempre.
+  // Il targetLocation della carta è usato solo come fallback quando
+  // non viene fornita nessuna scelta dalla UI.
   let targetLocIdx = overrideLocationIndex ?? np.currentLocation
 
-  if (card.type === 'curse' && card.targetLocation) {
-    const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
-    if (tLocIdx >= 0) targetLocIdx = tLocIdx
-  }
-  if (card.type === 'wicket' && card.targetLocation) {
-    const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
-    if (tLocIdx >= 0) targetLocIdx = tLocIdx
+  if (overrideLocationIndex === null) {
+    if (card.type === 'curse' && card.targetLocation) {
+      const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
+      if (tLocIdx >= 0) targetLocIdx = tLocIdx
+    }
+    if (card.type === 'wicket' && card.targetLocation) {
+      const tLocIdx = villain.locations.findIndex(l => l.id === card.targetLocation)
+      if (tLocIdx >= 0) targetLocIdx = tLocIdx
+    }
   }
 
   const loc = np.board.locations[targetLocIdx]

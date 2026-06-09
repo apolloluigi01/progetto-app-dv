@@ -226,21 +226,27 @@ export default function Game() {
         setActionError('Le Condizioni non si giocano con "Gioca Carta": si attivano durante il turno avversario.')
         return
       }
-      if (card.type === 'ally' || card.type === 'item') {
+      if (card.type === 'ally' || card.type === 'item' || card.type === 'curse' || card.type === 'wicket') {
         setMode('play_ally_location')
         setModeData(prev => ({ ...prev, cardId, cardName: card.name }))
         setUiMsg(`Scegli il luogo dove giocare "${card.name}". Clicca su un luogo della tua plancia.`)
         return
       }
-      // Effetti, Maledizioni, Wicket → luogo corrente
-      const res = await exec(playCard, cardId)
-      if (!res?.error) {
-        await exec(completeAction, modeData.actionIndex)
-        resetMode()
-      }
+      // Effetti → chiedi conferma prima di giocare
+      setModeData(prev => ({ ...prev, cardId, cardName: card.name }))
+      setMode('play_effect_confirm')
 
     } else if (mode === 'discard_mode') {
       setModeData(prev => ({ ...prev, pendingCardId: cardId, pendingCardName: card.name }))
+    }
+  }
+
+  // ── Conferma gioca effetto ────────────────────────────────
+  async function handleConfirmPlayEffect() {
+    const res = await exec(playCard, modeData.cardId)
+    if (!res?.error) {
+      await exec(completeAction, modeData.actionIndex)
+      resetMode()
     }
   }
 
@@ -563,7 +569,18 @@ export default function Game() {
                 />
               )}
 
-              {/* Pannello conferma gioca alleato/oggetto */}
+              {/* Pannello conferma gioca effetto */}
+              {isMyTurn && mode === 'play_effect_confirm' && (
+                <ConfirmPanel
+                  message={`Gioca l'effetto "${modeData.cardName}"?`}
+                  sub="La carta sarà risolta e andrà nello scarto."
+                  onConfirm={handleConfirmPlayEffect}
+                  onCancel={() => { setMode('play_card'); setModeData(prev => ({ ...prev, cardId: null, cardName: null })) }}
+                  confirmLabel="✓ Gioca Effetto"
+                />
+              )}
+
+              {/* Pannello conferma gioca alleato/oggetto/maledizione/wicket */}
               {isMyTurn && mode === 'play_ally_confirm' && (
                 <ConfirmPanel
                   message={`Gioca "${modeData.cardName}" in "${modeData.targetLocName}"?`}
