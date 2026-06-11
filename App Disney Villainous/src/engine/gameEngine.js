@@ -220,8 +220,9 @@ export function moveVillain(state, playerId, locationIndex) {
   const player = state.players[pidx]
   const villain = VILLAINS[player.villainId]
 
-  // Validazione: non puoi restare nel luogo in cui ti trovi
-  if (locationIndex === player.currentLocation) {
+  // Svanire: se attivo, Malefica può restare nello stesso luogo (skippa il check)
+  const svanireActive = player.svanireActive === true
+  if (locationIndex === player.currentLocation && !svanireActive) {
     return { error: 'Non puoi restare nel luogo in cui ti trovi già.' }
   }
   if (locationIndex < 0 || locationIndex >= villain.locations.length) {
@@ -236,9 +237,22 @@ export function moveVillain(state, playerId, locationIndex) {
     return { error: 'Non è il momento di muoversi.' }
   }
 
+  // Fuoco Verde: Malefica non può muoversi volontariamente in un luogo con Fuoco Verde
+  if (player.villainId === 'maleficent') {
+    const destLoc = player.board.locations[locationIndex]
+    const hasGreenFire = destLoc.curses.some(id => id.startsWith('mal_c_fuo'))
+    if (hasGreenFire) {
+      return { error: 'Non puoi muoverti in questo luogo: è bloccato da Fuoco Verde.' }
+    }
+  }
+
   const newPlayers = deepClone(state.players)
   newPlayers[pidx].lastLocation    = newPlayers[pidx].currentLocation
   newPlayers[pidx].currentLocation = locationIndex
+  // Consuma il flag Svanire se era attivo
+  if (svanireActive) newPlayers[pidx].svanireActive = false
+  // Reset Forma di Drago all'inizio del nuovo turno
+  if (newPlayers[pidx].dragonFormActive) newPlayers[pidx].dragonFormActive = false
 
   // Costruisce la coda delle azioni per questo turno
   const loc = villain.locations[locationIndex]
@@ -360,16 +374,24 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
 
   if (!player.hand.includes(cardId)) return { error: 'Carta non in mano.' }
 
+  // Bastone (Malefica): riduce costo di Effetti e Maledizioni di 1 se presente nel luogo corrente
+  let bastonBonus = 0
+  if (player.villainId === 'maleficent' && (card.type === 'effect' || card.type === 'curse')) {
+    const curLoc = player.board.locations[player.currentLocation]
+    if (curLoc.items.includes('mal_o_bas')) bastonBonus = 1
+  }
+  const effectiveCost = Math.max(0, (card.cost || 0) - bastonBonus)
+
   // Verifica costo
-  if ((card.cost || 0) > player.power) {
-    return { error: `Potere insufficiente. Costo: ${card.cost}, disponibile: ${player.power}.` }
+  if (effectiveCost > player.power) {
+    return { error: `Potere insufficiente. Costo: ${effectiveCost}${bastonBonus ? ` (ridotto da ${card.cost} per il Bastone)` : ''}, disponibile: ${player.power}.` }
   }
 
   const newPlayers = deepClone(state.players)
   const np = newPlayers[pidx]
 
-  // Paga il costo
-  np.power -= (card.cost || 0)
+  // Paga il costo (effettivo, con eventuale sconto Bastone)
+  np.power -= effectiveCost
 
   // Rimuovi dalla mano
   np.hand = np.hand.filter(id => id !== cardId)
@@ -414,6 +436,7 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
       np.villainDiscard.push(cardId)
   }
 
+
   // Sblocca il luogo bloccato se questa carta è la unlockCard di quel luogo
   // Trasformazione di Ursula usa logica toggle separata — esclusa qui
   const isTrasformazione = cardId === 'urs_e_tra_1' || cardId === 'urs_e_tra_2' || cardId === 'urs_e_tra_3'
@@ -427,6 +450,30 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   const specialLogs = []
   let specialGameOver = false
   let specialWinnerId = null
+
+  // ── Malefica: Sonno Senza Sogni → scarta se un Alleato viene GIOCATO qui (non mosso)
+  if (player.villainId === 'maleficent' && card.type === 'ally') {
+    const targetLoc = np.board.locations[targetLocIdx]
+    const sonniInLoc = targetLoc.curses.filter(id => id.startsWith('mal_c_son'))
+    if (sonniInLoc.length > 0) {
+      const toDiscard = sonniInLoc[0]
+      targetLoc.curses = targetLoc.curses.filter(id => id !== toDiscard)
+      np.villainDiscard.push(toDiscard)
+      specialLogs.push(`⚠️ Alleato giocato in un luogo con Sonno Senza Sogni: "${toDiscard}" viene scartata!`)
+    }
+  }
+
+  // ── Malefica: Svanire → segna che al prossimo turno non deve muoversi
+  if (cardId === 'mal_e_sva_1' || cardId === 'mal_e_sva_2' || cardId === 'mal_e_sva_3') {
+    np.svanireActive = true
+    specialLogs.push(`Svanire: al prossimo turno Malefica non è obbligata a spostarsi.`)
+  }
+
+  // ── Malefica: Forma di Drago → segna il flag per guadagnare 3 Potere per ogni Fato subito
+  if (cardId === 'mal_e_dra_1' || cardId === 'mal_e_dra_2' || cardId === 'mal_e_dra_3') {
+    np.dragonFormActive = true
+    specialLogs.push(`Forma di Drago attiva: guadagnerai 3 Potere per ogni azione Fato subita fino al tuo prossimo turno.`)
+  }
 
   // Jafar: Lampada Magica → trova il Genio nel mazzo Fato e lo posiziona qui
   if (cardId === 'jaf_o_lam') {
@@ -806,6 +853,12 @@ export function startFate(state, playerId, targetPlayerId) {
     return newState
   }
 
+  // ── Malefica: Forma di Drago → guadagna 3 Potere se il flag è attivo sul bersaglio
+  if (target.villainId === 'maleficent' && target.dragonFormActive) {
+    target.power = (target.power || 0) + 3
+    newPlayers[tidx] = target
+  }
+
   let newState = {
     ...state,
     players: newPlayers,
@@ -822,6 +875,9 @@ export function startFate(state, playerId, targetPlayerId) {
     `${actor?.name} usa Fato contro ${targetP?.name}! (pescate ${drawn.length} carte)`,
     'fate'
   )
+  if (target.villainId === 'maleficent' && target.dragonFormActive) {
+    newState = addLog(newState, `🐉 Forma di Drago: Malefica guadagna 3 Potere (tot: ${target.power})!`, 'fate')
+  }
   return newState
 }
 
@@ -906,6 +962,58 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
   }
 
   const locName = villain?.locations[locationIndex]?.name || '?'
+  const fateLogs = []
+
+  // ── Malefica: Aurora → scarta la Foresta di Rovi nel luogo in cui viene giocata
+  if (cardId === 'fmal_aurora' && target.villainId === 'maleficent') {
+    const foresteLoc = target.board.locations[locationIndex]
+    const forestaIdx = foresteLoc.curses.findIndex(id => id.startsWith('mal_c_roi'))
+    if (forestaIdx >= 0) {
+      const discarded = foresteLoc.curses.splice(forestaIdx, 1)[0]
+      target.fateDiscard.push(discarded)
+      fateLogs.push(`Aurora scarta la Foresta di Rovi in "${locName}"!`)
+    }
+  }
+
+  // ── Malefica: Re Stefano → scarta Foresta di Rovi in questo luogo
+  if (cardId === 'fmal_stefano' && target.villainId === 'maleficent') {
+    const stefanoLoc = target.board.locations[locationIndex]
+    const forestaIdx = stefanoLoc.curses.findIndex(id => id.startsWith('mal_c_roi'))
+    if (forestaIdx >= 0) {
+      const discarded = stefanoLoc.curses.splice(forestaIdx, 1)[0]
+      target.fateDiscard.push(discarded)
+      fateLogs.push(`Re Stefano scarta la Foresta di Rovi in "${locName}"!`)
+    }
+    fateLogs.push(`Re Stefano: scegli un luogo dove spostare Malefica. Se ha Fuoco Verde, quella Maledizione verrà scartata.`)
+  }
+
+  // ── Malefica: Principe Filippo → scarta tutti gli Alleati nei luoghi adiacenti
+  if (cardId === 'fmal_filippo' && target.villainId === 'maleficent') {
+    const adjacentIndices = [locationIndex - 1, locationIndex + 1].filter(
+      i => i >= 0 && i < target.board.locations.length
+    )
+    for (const adjIdx of adjacentIndices) {
+      const adjLoc = target.board.locations[adjIdx]
+      const adjName = villain?.locations[adjIdx]?.name || '?'
+      if (adjLoc.allies.length > 0) {
+        const discarded = [...adjLoc.allies]
+        adjLoc.allies = []
+        target.villainDiscard.push(...discarded)
+        fateLogs.push(`Principe Filippo scarta ${discarded.length} Alleato/i da "${adjName}" (incluso il Corvo se presente)!`)
+      }
+    }
+  }
+
+  // ── Malefica: Fauna → scarta un Sonno Senza Sogni nel luogo in cui viene giocata
+  if (cardId === 'fmal_fauna' && target.villainId === 'maleficent') {
+    const faunaLoc = target.board.locations[locationIndex]
+    const sonnoIdx = faunaLoc.curses.findIndex(id => id.startsWith('mal_c_son'))
+    if (sonnoIdx >= 0) {
+      const discarded = faunaLoc.curses.splice(sonnoIdx, 1)[0]
+      target.fateDiscard.push(discarded)
+      fateLogs.push(`Fauna scarta il Sonno Senza Sogni in "${locName}"!`)
+    }
+  }
 
   let newState = {
     ...state,
@@ -919,6 +1027,9 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
     `"${fateCard.name}" posizionato in "${locName}" di ${target.name}.`,
     'fate'
   )
+  for (const msg of fateLogs) {
+    newState = addLog(newState, msg, 'fate')
+  }
   return newState
 }
 
