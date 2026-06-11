@@ -103,22 +103,35 @@ export function useGame(roomCode) {
     return { ok: true }
   }, [gameId])
 
+  // Azioni "principali" che aggiornano lo snapshot per l'undo step-by-step
+  const SNAPSHOT_ACTIONS = [
+    engine.moveVillain,
+    engine.playVillainCard,
+    engine.playVillainCardToLocation,
+    engine.discardCard,
+    engine.gainPower,
+    engine.removePower,
+    engine.moveAllyOrItem,
+    engine.vanquish,
+  ]
+
   // ── Helper: esegui un'azione engine + persist ───────────
   const dispatch = useCallback(async (fn, ...args) => {
     const current = gameStateRef.current
     if (!current) return { error: 'State non caricato.' }
 
-    // Salva snapshot prima di ogni azione (escluse le meta-azioni undo/respond)
     const isMetaAction = fn === engine.requestUndo || fn === engine.respondUndo
-    const withSnapshot = isMetaAction
-      ? current
-      : { ...current, undoSnapshot: current.undoSnapshot ?? current }
+    // Le azioni principali aggiornano lo snapshot a ogni chiamata (undo step-by-step)
+    const withSnapshot = (!isMetaAction && SNAPSHOT_ACTIONS.includes(fn))
+      ? { ...current, undoSnapshot: { ...current, undoSnapshot: null } }
+      : current
 
     const result = fn(withSnapshot, ...args)
     if (result?.error) return result
     gameStateRef.current = result
     setGameState(result)
     return persistState(result)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persistState])
 
   // ── Crea partita (host) ─────────────────────────────────
@@ -253,6 +266,11 @@ export function useGame(roomCode) {
     return dispatch(engine.assignFateItem, targetPlayerId, itemCardId, heroCardId)
   }, [dispatch])
 
+  // ── Aurora: posiziona eroe rivelato ─────────────────────
+  const placeRevealedHero = useCallback((locationIndex) => {
+    return dispatch(engine.placeRevealedHero, myPlayerId, locationIndex)
+  }, [dispatch, myPlayerId])
+
   // ── Condizioni ───────────────────────────────────────────
   const requestConditionActivation = useCallback((cardId) => {
     return dispatch(engine.requestConditionActivation, myPlayerId, cardId)
@@ -350,6 +368,7 @@ export function useGame(roomCode) {
     startFate,
     resolveFate,
     placeFateCard,
+    placeRevealedHero,
     assignFateItem,
     requestConditionActivation,
     respondConditionActivation,

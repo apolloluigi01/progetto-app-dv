@@ -56,7 +56,7 @@ export default function Game() {
     joinGame, selectVillain, startGame,
     moveVillain, gainPower, playCard, playCardToLocation,
     discardCard, moveAllyOrItem, vanquish,
-    startFate, resolveFate, placeFateCard,
+    startFate, resolveFate, placeFateCard, placeRevealedHero,
     assignFateItem,
     requestConditionActivation, respondConditionActivation,
     conditionDiscardCard, conditionDefeatHero, conditionDiscardOpponentItem,
@@ -86,6 +86,15 @@ export default function Game() {
     setUiMsg(null)
     setFatePendingCard(null)
   }, [gameState?.currentPlayerIndex, gameState?.phase])
+
+  // Sincronizza mode con pendingFateReveal (effetto Aurora)
+  useEffect(() => {
+    const rev = gameState?.pendingFateReveal
+    if (rev && rev.actorPlayerId === myPlayerId) {
+      setMode('aurora_place_hero')
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameState?.pendingFateReveal?.heroCardId, gameState?.pendingFateReveal?.actorPlayerId, myPlayerId])
 
   // Sincronizza mode con pendingConditionEffect
   useEffect(() => {
@@ -181,17 +190,21 @@ export default function Game() {
       setModeData({ actionIndex })
 
     } else if (action.type === 'move') {
+      const isMaleficent = myPlayer.villainId === 'maleficent'
       const hasMovables = myPlayer.board.locations.some(
-        loc => loc.allies.length > 0 || loc.items.length > 0
+        loc => loc.allies.length > 0 || loc.items.length > 0 ||
+               (isMaleficent && loc.curses.length > 0)
       )
       if (!hasMovables) {
-        setActionError('Nessun Alleato o Oggetto presente nel Reame da spostare.')
+        setActionError('Nessun Alleato, Oggetto' + (isMaleficent ? ' o Maledizione' : '') + ' presente nel Reame da spostare.')
         await exec(completeAction, actionIndex)
         return
       }
       setMode('move_ally_pick')
       setModeData({ actionIndex })
-      setUiMsg('Clicca su un Alleato o Oggetto nella plancia per selezionarlo.')
+      setUiMsg(isMaleficent
+        ? 'Clicca su un Alleato, Oggetto o Maledizione nella plancia per selezionarlo.'
+        : 'Clicca su un Alleato o Oggetto nella plancia per selezionarlo.')
 
     } else if (action.type === 'vanquish') {
       const allHeroes = myPlayer.board.locations.flatMap(loc => loc.heroes)
@@ -308,15 +321,30 @@ export default function Game() {
     }
   }
 
-  // ── Click su alleato/oggetto nella plancia ────────────────
+  // ── Click su alleato/oggetto/maledizione nella plancia ───
   function handleAllyItemClick(cardId, fromLocIdx) {
-    if (mode !== 'move_ally_pick') return
+    if (mode !== 'move_ally_pick' && mode !== 'move_ally_dest') return
+    // Reclicca la stessa carta in mode dest → deseleziona
+    if (mode === 'move_ally_dest' && modeData.cardId === cardId && modeData.fromLocIdx === fromLocIdx) {
+      setMode('move_ally_pick')
+      setModeData(prev => ({ ...prev, cardId: null, cardName: null, fromLocIdx: null, fromLocName: null }))
+      const isMaleficent = myPlayer?.villainId === 'maleficent'
+      setUiMsg(isMaleficent
+        ? 'Clicca su un Alleato, Oggetto o Maledizione nella plancia per selezionarlo.'
+        : 'Clicca su un Alleato o Oggetto nella plancia per selezionarlo.')
+      return
+    }
     const allCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
     const card     = allCards.find(c => c.id === cardId)
     const fromLocName = myVillain?.locations[fromLocIdx]?.name || `Luogo ${fromLocIdx + 1}`
     setMode('move_ally_dest')
     setModeData(prev => ({ ...prev, cardId, cardName: card?.name || cardId, fromLocIdx, fromLocName }))
-    setUiMsg(`"${card?.name || cardId}" selezionato. Clicca il luogo di destinazione.`)
+    setUiMsg(`"${card?.name || cardId}" selezionato. Clicca il luogo di destinazione (o reclicca la carta per deselezionare).`)
+  }
+
+  // ── Aurora: piazza eroe rivelato ─────────────────────────
+  async function handleAuroraPlaceHero(locationIndex) {
+    await exec(placeRevealedHero, locationIndex)
   }
 
   // ── Conferma spostamento alleato/oggetto ──────────────────
@@ -533,7 +561,7 @@ export default function Game() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {isMyTurn && gameState.undoSnapshot && !gameState.undoRequest && (
+          {isMyTurn && gameState.undoSnapshot && !gameState.undoRequest && !gameState.fateDoneThisTurn && (
             <button onClick={() => exec(requestUndo)}
                     className="btn-secondary text-xs px-3 py-1.5 border-orange-700/50 text-orange-300 hover:border-orange-500">
               ↩ Annulla
@@ -637,8 +665,14 @@ export default function Game() {
                 mode === 'cond_fate_one_card' &&
                 gameState.pendingConditionEffect?.playerId === myPlayerId &&
                 gameState.pendingConditionEffect?.targetPlayerId === opp.id
+              // Aurora: piazza eroe rivelato nel Reame di Malefica
+              const isAuroraTarget =
+                mode === 'aurora_place_hero' &&
+                gameState.pendingFateReveal?.actorPlayerId === myPlayerId &&
+                gameState.pendingFateReveal?.targetPlayerId === opp.id
               const oppClickHandler = isFateTarget ? handlePlaceFateCard
                 : isConditionFateTarget ? handleConditionFateOneCardLocation
+                : isAuroraTarget ? handleAuroraPlaceHero
                 : undefined
               return (
                 <PlayerBoard key={opp.id} player={opp} isMyBoard={false} isMyTurn={false}
@@ -701,6 +735,37 @@ export default function Game() {
                 />
               )}
 
+              {/* Pannello selezione carta da spostare (con tasto annulla selezione) */}
+              {isMyTurn && mode === 'move_ally_dest' && (
+                <div className="bg-blue-950/40 border border-blue-700/50 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <p className="text-sm text-blue-200">
+                    <strong>"{modeData.cardName}"</strong> selezionato — clicca il luogo di destinazione.
+                  </p>
+                  <button
+                    onClick={() => {
+                      setMode('move_ally_pick')
+                      setModeData(prev => ({ ...prev, cardId: null, cardName: null, fromLocIdx: null, fromLocName: null }))
+                    }}
+                    className="btn-secondary text-xs px-3 shrink-0"
+                  >✕ Deseleziona</button>
+                </div>
+              )}
+
+              {/* Pannello Aurora: posiziona eroe rivelato */}
+              {mode === 'aurora_place_hero' && gameState.pendingFateReveal?.actorPlayerId === myPlayerId && (() => {
+                const heroCard = findCardFromAll(gameState, gameState.pendingFateReveal.heroCardId)
+                return (
+                  <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4 flex flex-col gap-3">
+                    <h3 className="font-display text-rose-300 font-bold text-sm">⚡ Aurora: Eroe Rivelato</h3>
+                    <p className="text-sm text-gray-300">
+                      Aurora ha rivelato <strong>"{heroCard?.name || gameState.pendingFateReveal.heroCardId}"</strong> dal mazzo Fato di Malefica.
+                      Clicca un luogo nella plancia di Malefica per posizionarlo.
+                    </p>
+                    {heroCard && <Card card={heroCard} small showEffect={false} />}
+                  </div>
+                )
+              })()}
+
               <PlayerBoard
                 player={myPlayer}
                 isMyBoard={true}
@@ -722,7 +787,7 @@ export default function Game() {
                   mode === 'cond_play_ally_pick' ? handleConditionAllyPicked :
                   undefined
                 }
-                onAllyItemClick={isMyTurn && mode === 'move_ally_pick' ? handleAllyItemClick : undefined}
+                onAllyItemClick={isMyTurn && (mode === 'move_ally_pick' || mode === 'move_ally_dest') ? handleAllyItemClick : undefined}
               />
 
               {/* Panel: modalità scarto */}

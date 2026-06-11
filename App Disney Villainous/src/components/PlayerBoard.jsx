@@ -37,7 +37,7 @@ export default function PlayerBoard({
     if (!onLocationClick) return false
     if (locState.isLocked) return false
     if (!isMyBoard) return true // plancia avversario: fate_resolve o condition fate
-    if (phase === 'move') return i !== player.lastLocation
+    if (phase === 'move') return i !== player.currentLocation
     if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
     // Condizioni: selezione luogo per alleato gratuito o Ossessione
     if (activeMode === 'cond_play_ally_location' || activeMode === 'cond_ossessione_location') return true
@@ -85,13 +85,14 @@ export default function PlayerBoard({
           const isVillainHere = player.currentLocation === i
           const isLocActive   = isActive && isVillainHere
           const isStaged      = isMyBoard && stagedLocation === i
-          const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.lastLocation
+          const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.currentLocation
           const isLocked      = locState.isLocked === true
           const clickable     = isLocClickable(i, locState)
 
           // In move_ally_pick: evidenzia luoghi con alleati/oggetti
           const highlightMovable = isMyBoard && activeMode === 'move_ally_pick' &&
-            (locState.allies.length > 0 || locState.items.length > 0)
+            (locState.allies.length > 0 || locState.items.length > 0 ||
+             (villain.id === 'maleficent' && locState.curses.length > 0))
 
           return (
             <Location

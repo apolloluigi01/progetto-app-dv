@@ -123,11 +123,19 @@ export default function Location({
       <div className="flex flex-wrap gap-1 mt-0.5 min-h-[1rem]">
 
         {locationState.curses?.map(id => {
-          const card = findCard(id)
+          const card    = findCard(id)
+          const clickable = !!onAllyItemClick && villain.id === 'maleficent'
+          const isSel   = selectedCardId === id
           return (
             <span key={id}
-                  className="text-[9px] bg-indigo-900/60 border border-indigo-700/50 text-indigo-300
-                             px-1.5 py-0.5 rounded"
+                  onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
+                  className={[
+                    'text-[9px] px-1.5 py-0.5 rounded border transition-all',
+                    isSel
+                      ? 'bg-indigo-600 border-indigo-400 text-white ring-1 ring-indigo-300'
+                      : 'bg-indigo-900/60 border-indigo-700/50 text-indigo-300',
+                    clickable ? 'cursor-pointer hover:border-indigo-400' : '',
+                  ].join(' ')}
                   title={card?.effect || id}>
               🌑 {card?.name || id}
             </span>

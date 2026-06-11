@@ -119,6 +119,8 @@ export function initializeGame(players) {
     actionQueue:      [],              // azioni rimaste da fare nel turno corrente
     pendingFate:      null,            // { targetPlayerId, cards: [id, id] }
     pendingInteraction: null,          // per effetti card-specifici
+    pendingFateReveal: null,           // { actorPlayerId, targetPlayerId, heroCardId }
+    fateDoneThisTurn: false,
     log:              [],
     winnerId:         null,
     players:          initializedPlayers,
@@ -863,6 +865,7 @@ export function startFate(state, playerId, targetPlayerId) {
     ...state,
     players: newPlayers,
     phase: 'fate_choice',
+    fateDoneThisTurn: true,
     pendingFate: {
       actingPlayerId: playerId,
       targetPlayerId,
@@ -1026,11 +1029,39 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
     }
   }
 
+  // ── Malefica: Aurora → rivela prima carta del mazzo Fato; se Eroe → piazzarlo
+  let pendingFateReveal = null
+  if (cardId === 'fmal_aurora' && target.villainId === 'maleficent') {
+    if (target.fateDeck.length === 0 && target.fateDiscard.length > 0) {
+      target.fateDeck   = shuffle([...target.fateDiscard])
+      target.fateDiscard = []
+    }
+    if (target.fateDeck.length > 0) {
+      const revealedId   = target.fateDeck[0]
+      const malFateDefs  = VILLAINS['maleficent'].fateDeck
+      const revealedCard = malFateDefs.find(c => c.id === revealedId)
+      if (revealedCard?.type === 'hero') {
+        target.fateDeck.splice(0, 1)
+        pendingFateReveal = {
+          actorPlayerId: state.players[state.currentPlayerIndex].id,
+          targetPlayerId: target.id,
+          heroCardId: revealedId,
+        }
+        fateLogs.push(`Aurora: rivelato "${revealedCard.name}" (Eroe)! Scegliere dove posizionarlo nel Reame di Malefica.`)
+      } else {
+        fateLogs.push(`Aurora: rivelato "${revealedCard?.name || revealedId}" — non è un Eroe, rimesso in cima al mazzo Fato.`)
+      }
+    } else {
+      fateLogs.push(`Aurora: il mazzo Fato di Malefica è esaurito, nessuna carta da rivelare.`)
+    }
+  }
+
   let newState = {
     ...state,
     players: newPlayers,
     phase: 'action',
     pendingInteraction: null,
+    ...(pendingFateReveal ? { pendingFateReveal } : {}),
   }
 
   newState = addLog(
@@ -1042,6 +1073,17 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
     newState = addLog(newState, msg, 'fate')
   }
   return newState
+}
+
+/**
+ * Posiziona l'Eroe rivelato dall'effetto di Aurora nel Reame di Malefica.
+ */
+export function placeRevealedHero(state, actorPlayerId, locationIndex) {
+  const rev = state.pendingFateReveal
+  if (!rev) return { error: 'Nessun Eroe rivelato da posizionare.' }
+  if (rev.actorPlayerId !== actorPlayerId) return { error: 'Non sei il giocatore che ha attivato Aurora.' }
+  const stateCleared = { ...state, pendingFateReveal: null }
+  return placeFateCard(stateCleared, rev.heroCardId, rev.targetPlayerId, locationIndex)
 }
 
 function findFateCard(state, cardId) {
@@ -1396,6 +1438,7 @@ export function conditionSkipEffect(state, playerId) {
 export function requestUndo(state, playerId) {
   const player = getPlayerById(state, playerId)
   if (!player) return { error: 'Giocatore non trovato.' }
+  if (state.fateDoneThisTurn) return { error: 'Non si può richiedere annullamento se si è svolto un Fato.' }
   if (!state.undoSnapshot) return { error: 'Nessuna giocata da annullare.' }
   if (state.undoRequest)   return { error: 'Richiesta di annullamento già in corso.' }
 
@@ -1483,6 +1526,8 @@ export function endTurn(state) {
     pendingInteraction: null,
     pendingConditionActivation: null,
     pendingConditionEffect: null,
+    pendingFateReveal: null,
+    fateDoneThisTurn: false,
     undoRequest: null,
     undoSnapshot: null,
   }
@@ -1605,6 +1650,7 @@ export default {
   startFate,
   resolveFate,
   placeFateCard,
+  placeRevealedHero,
   assignFateItem,
   requestConditionActivation,
   respondConditionActivation,
