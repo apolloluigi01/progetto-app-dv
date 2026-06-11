@@ -1,4 +1,5 @@
-import { VILLAINS, ACTION_LABELS, ACTION_COLORS } from '../data/villains.js'
+import { useState } from 'react'
+import { VILLAINS, ACTION_LABELS, ACTION_COLORS, CARD_TYPE_COLORS, CARD_TYPE_LABELS } from '../data/villains.js'
 
 const VILLAIN_EMOJI = {
   maleficent:      '🧙‍♀️',
@@ -26,6 +27,8 @@ export default function Location({
   onActionClick,
   onAllyItemClick,    // callback(cardId) — clicca su alleato/oggetto per spostarlo
 }) {
+  const [detailCard, setDetailCard] = useState(null)
+
   const allCards = [...villain.villainDeck, ...villain.fateDeck]
   const findCard = (id) => allCards.find(c => c.id === id)
 
@@ -46,6 +49,44 @@ export default function Location({
                 : 'border-gray-800'
 
   return (
+    <>
+    {detailCard && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+        onClick={() => setDetailCard(null)}
+      >
+        <div
+          className="bg-gray-900 border border-gray-600 rounded-2xl p-5 max-w-sm w-full mx-4 shadow-2xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div className="flex-1 min-w-0">
+              <span className={`${CARD_TYPE_COLORS[detailCard.type] || 'bg-gray-800 text-gray-300'} text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wide`}>
+                {CARD_TYPE_LABELS[detailCard.type] || detailCard.type}
+              </span>
+              <h2 className="font-display font-bold text-white text-lg mt-1.5 leading-tight">{detailCard.name}</h2>
+              <div className="flex items-center gap-3 mt-1.5 text-xs flex-wrap">
+                {detailCard.cost != null && <span className="text-yellow-400">⚡ Costo: <strong>{detailCard.cost}</strong></span>}
+                {detailCard.strength != null && <span className="text-red-400">⚔️ Forza: <strong>{detailCard.strength}</strong></span>}
+              </div>
+            </div>
+            <button onClick={() => setDetailCard(null)} className="text-gray-500 hover:text-gray-200 text-xl leading-none shrink-0 transition-colors">✕</button>
+          </div>
+          {detailCard.effect ? (
+            <div className="bg-gray-800/60 rounded-xl px-4 py-3 mb-3">
+              <p className="text-[10px] text-gray-500 font-display uppercase tracking-wider mb-1.5">Effetto</p>
+              <p className="text-sm text-gray-200 leading-relaxed">{detailCard.effect}</p>
+            </div>
+          ) : (
+            <p className="text-gray-600 text-sm italic mb-3">Nessun effetto testuale.</p>
+          )}
+          {detailCard.targetLocation && (
+            <p className="text-xs text-indigo-400 mb-3">→ Luogo: <strong>{detailCard.targetLocation.replace(/_/g, ' ')}</strong></p>
+          )}
+          <button onClick={() => setDetailCard(null)} className="w-full btn-secondary text-sm py-2">Chiudi</button>
+        </div>
+      </div>
+    )}
     <div
       onClick={!isBlocked && !isLocked ? onClick : undefined}
       className={`location-tile flex flex-col gap-2 transition-all duration-150 ${borderClass}`}
@@ -138,6 +179,7 @@ export default function Location({
                   ].join(' ')}
                   title={card?.effect || id}>
               🌑 {card?.name || id}
+              {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
         })}
@@ -150,6 +192,7 @@ export default function Location({
                              px-1.5 py-0.5 rounded"
                   title={card?.effect || id}>
               ⬤ {card?.name || id}
+              {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
         })}
@@ -170,6 +213,7 @@ export default function Location({
                   ].join(' ')}
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               ⚔️ {card?.name || id} ({card?.strength ?? '?'})
+              {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
         })}
@@ -190,6 +234,7 @@ export default function Location({
                   ].join(' ')}
                   title={card?.effect || id}>
               📦 {card?.name || id}
+              {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
         })}
@@ -207,6 +252,7 @@ export default function Location({
                              px-1.5 py-0.5 rounded"
                   title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               🛡️ {card?.name || id} ({card?.strength ?? '?'})
+              {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
               {assignedItems.length > 0 && (
                 <span className="text-amber-400"> [+{assignedItems.join(', ')}]</span>
               )}
@@ -215,5 +261,6 @@ export default function Location({
         })}
       </div>
     </div>
+    </>
   )
 }

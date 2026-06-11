@@ -8,7 +8,7 @@ import { useGame }    from '../hooks/useGame.js'
 import VillainSelect  from './VillainSelect.jsx'
 import PlayerBoard    from './PlayerBoard.jsx'
 import Card           from './Card.jsx'
-import { VILLAINS }   from '../data/villains.js'
+import { VILLAINS, ACTION_LABELS, ACTION_COLORS }   from '../data/villains.js'
 
 const VILLAIN_EMOJI = {
   maleficent:      '🧙‍♀️',
@@ -55,7 +55,7 @@ export default function Game() {
     currentPlayer, loading, error,
     joinGame, selectVillain, startGame,
     moveVillain, gainPower, playCard, playCardToLocation,
-    discardCard, moveAllyOrItem, vanquish,
+    discardCard, moveAllyOrItem, moveCorvoAlly, vanquish,
     startFate, resolveFate, placeFateCard, placeRevealedHero,
     assignFateItem,
     requestConditionActivation, respondConditionActivation,
@@ -65,6 +65,9 @@ export default function Game() {
     requestUndo, respondUndo,
     completeAction, endTurn,
   } = useGame(roomCode)
+
+  const [corvoUsed,    setCorvoUsed]    = useState(false)
+  const [corvoDestIdx, setCorvoDestIdx] = useState(null)
 
   const [hasJoined, setHasJoined] = useState(false)
   useEffect(() => {
@@ -85,6 +88,8 @@ export default function Game() {
     setActionError(null)
     setUiMsg(null)
     setFatePendingCard(null)
+    setCorvoUsed(false)
+    setCorvoDestIdx(null)
   }, [gameState?.currentPlayerIndex, gameState?.phase])
 
   // Sincronizza mode con pendingFateReveal (effetto Aurora)
@@ -159,6 +164,12 @@ export default function Game() {
   const myVillain    = myPlayer ? VILLAINS[myPlayer.villainId] : null
   const myLocState   = myPlayer ? myPlayer.board.locations[myPlayer.currentLocation] : null
 
+  // Corvo (Malefica): trova l'indice del luogo dove si trova il Corvo
+  const corvoLocIdx = myPlayer
+    ? myPlayer.board.locations.findIndex(loc => loc.allies.includes('mal_a_cor'))
+    : -1
+  const corvoIsOnField = corvoLocIdx >= 0
+
   // ─────────────────────────────────────────────────────────
   // HANDLERS
   // ─────────────────────────────────────────────────────────
@@ -232,7 +243,15 @@ export default function Game() {
       }
 
     } else if (action.type === 'activate') {
-      setUiMsg('Attiva: usa l\'abilità di un Oggetto o Alleato nella tua plancia.')
+      const allVCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
+      const activatable = myPlayer.board.locations.flatMap(loc =>
+        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('Attivazione'))
+      )
+      if (activatable.length === 0) {
+        setActionError('Nessun alleato/oggetto attivabile nel Reame.')
+      } else {
+        setUiMsg(`Attiva: ${activatable.map(c => `"${c.name}"`).join(', ')}. Esegui l'abilità manualmente.`)
+      }
       await exec(completeAction, actionIndex)
 
     } else if (action.type === 'move_hero') {
@@ -273,7 +292,8 @@ export default function Game() {
   async function handleConfirmPlayEffect() {
     const res = await exec(playCard, modeData.cardId)
     if (!res?.error) {
-      await exec(completeAction, modeData.actionIndex)
+      if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
+      else await exec(completeAction, modeData.actionIndex)
       resetMode()
     }
   }
@@ -285,12 +305,19 @@ export default function Game() {
   }
 
   async function handleEndDiscard() {
+    if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null); resetMode(); return }
     await exec(completeAction, modeData.actionIndex)
     resetMode()
   }
 
   // ── Click su luogo (mia plancia) ─────────────────────────
-  function handleMyLocationClick(idx) {
+  async function handleMyLocationClick(idx) {
+    if (mode === 'corvo_dest_pick') {
+      if (idx === corvoLocIdx) { setActionError('Scegli un luogo diverso da quello attuale del Corvo.'); return }
+      const res = await exec(moveCorvoAlly, idx)
+      if (!res?.error) { setCorvoDestIdx(idx); setMode('corvo_action_pick'); setUiMsg(null) }
+      return
+    }
     if (isMyTurn && phase === 'move') {
       if (idx !== myPlayer.currentLocation) setStagedLocation(idx)
       return
@@ -316,7 +343,8 @@ export default function Game() {
   async function handleConfirmPlayAlly() {
     const res = await exec(playCardToLocation, modeData.cardId, modeData.targetLocIdx)
     if (!res?.error) {
-      await exec(completeAction, modeData.actionIndex)
+      if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
+      else await exec(completeAction, modeData.actionIndex)
       resetMode()
     }
   }
@@ -347,12 +375,61 @@ export default function Game() {
     await exec(placeRevealedHero, locationIndex)
   }
 
+  // ── Corvo: esegui azione al luogo di destinazione ────────
+  async function handleCorvoActionClick(action) {
+    const isMaleficent = myPlayer?.villainId === 'maleficent'
+    const doneCorvo = () => { setCorvoUsed(true); setCorvoDestIdx(null); resetMode() }
+
+    if (action.type === 'gain_power') {
+      await exec(gainPower, action.value)
+      doneCorvo()
+    } else if (action.type === 'play_card') {
+      setMode('play_card')
+      setModeData({ isCorvoAction: true })
+      setUiMsg('Corvo — Seleziona una carta dalla mano da giocare.')
+    } else if (action.type === 'discard') {
+      setMode('discard_mode')
+      setModeData({ isCorvoAction: true })
+    } else if (action.type === 'move') {
+      const hasMovables = myPlayer.board.locations.some(
+        loc => loc.allies.length > 0 || loc.items.length > 0 || (isMaleficent && loc.curses.length > 0)
+      )
+      if (!hasMovables) {
+        setActionError('Nessun Alleato' + (isMaleficent ? ', Oggetto o Maledizione' : ' o Oggetto') + ' da spostare.')
+        return
+      }
+      setMode('move_ally_pick')
+      setModeData({ isCorvoAction: true })
+      setUiMsg(isMaleficent
+        ? 'Corvo — Clicca su un Alleato, Oggetto o Maledizione da spostare.'
+        : 'Corvo — Clicca su un Alleato o Oggetto da spostare.')
+    } else if (action.type === 'vanquish') {
+      const allHeroes = myPlayer.board.locations.flatMap(loc => loc.heroes)
+      if (allHeroes.length === 0) { setActionError('Scontro non applicabile: nessun Eroe nel Reame.'); return }
+      const allAllies = myPlayer.board.locations.flatMap(loc => loc.allies)
+      if (allAllies.length === 0) { setActionError('Scontro non applicabile: nessun Alleato nel Reame.'); return }
+      setMode('vanquish_mode')
+      setModeData({ isCorvoAction: true, selectedHeroId: null, selectedAllyIds: [] })
+    } else if (action.type === 'activate') {
+      const allVCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
+      const activatable = myPlayer.board.locations.flatMap(loc =>
+        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('Attivazione'))
+      )
+      if (activatable.length === 0) setActionError('Nessun alleato/oggetto attivabile nel Reame.')
+      else setUiMsg(`Corvo — Attiva: ${activatable.map(c => `"${c.name}"`).join(', ')}. Esegui manualmente.`)
+      doneCorvo()
+    } else {
+      doneCorvo()
+    }
+  }
+
   // ── Conferma spostamento alleato/oggetto ──────────────────
   async function handleConfirmMoveAlly() {
-    const { cardId, fromLocIdx, toLocIdx, actionIndex } = modeData
+    const { cardId, fromLocIdx, toLocIdx, actionIndex, isCorvoAction } = modeData
     const res = await exec(moveAllyOrItem, cardId, fromLocIdx, toLocIdx)
     if (!res?.error) {
-      await exec(completeAction, actionIndex)
+      if (isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
+      else await exec(completeAction, actionIndex)
       resetMode()
     }
   }
@@ -368,11 +445,12 @@ export default function Game() {
     })
   }
   async function handleConfirmVanquish() {
-    const { selectedHeroId, selectedAllyIds, actionIndex } = modeData
+    const { selectedHeroId, selectedAllyIds, actionIndex, isCorvoAction } = modeData
     if (!selectedHeroId || !selectedAllyIds?.length) return
     const res = await exec(vanquish, selectedHeroId, selectedAllyIds)
     if (!res?.error) {
-      await exec(completeAction, actionIndex)
+      if (isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
+      else await exec(completeAction, actionIndex)
       resetMode()
     }
   }
@@ -750,6 +828,63 @@ export default function Game() {
                   >✕ Deseleziona</button>
                 </div>
               )}
+
+              {/* Pannello Muovi Corvo — visibile durante fase move se Corvo è in campo */}
+              {isMyTurn && phase === 'move' && !corvoUsed && corvoIsOnField && myPlayer.villainId === 'maleficent' && mode !== 'corvo_dest_pick' && mode !== 'corvo_action_pick' && (
+                <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <p className="text-sm text-gray-300">
+                    🦅 <strong>Il Corvo è presente nel Reame.</strong> Puoi muoverlo prima di spostarti.
+                  </p>
+                  <button
+                    onClick={() => { setMode('corvo_dest_pick'); setUiMsg('Clicca il luogo di destinazione per il Corvo (adiacente a quello attuale).') }}
+                    className="btn-secondary text-xs px-4 shrink-0"
+                  >🦅 Muovi Corvo</button>
+                </div>
+              )}
+
+              {/* Pannello selezione destinazione Corvo */}
+              {isMyTurn && mode === 'corvo_dest_pick' && (
+                <div className="bg-gray-800/60 border border-gray-600 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <p className="text-sm text-gray-300">
+                    🦅 Clicca un luogo di destinazione per il Corvo (luogo adiacente a quello attuale).
+                  </p>
+                  <button onClick={() => { setMode(null); setUiMsg(null) }} className="btn-secondary text-xs px-3">Annulla</button>
+                </div>
+              )}
+
+              {/* Pannello azione Corvo dopo spostamento */}
+              {isMyTurn && mode === 'corvo_action_pick' && corvoDestIdx !== null && myVillain && (() => {
+                const destLocDef   = myVillain.locations[corvoDestIdx]
+                const destLocState = myPlayer.board.locations[corvoDestIdx]
+                const availableActions = destLocDef.actions
+                  .map((a, i) => ({ ...a, i }))
+                  .filter(({ type, i }) => type !== 'fate' && !destLocState.coveredActionIndices?.includes(i))
+                return (
+                  <div className="bg-yellow-950/40 border border-yellow-700/50 rounded-xl p-4 flex flex-col gap-3">
+                    <h3 className="font-display text-yellow-300 font-bold text-sm">🦅 Corvo — Azione disponibile</h3>
+                    <p className="text-xs text-yellow-400">
+                      Il Corvo è in <strong>"{destLocDef.name}"</strong>. Scegli un'azione da svolgere (escluso Fato).
+                    </p>
+                    {availableActions.length === 0 ? (
+                      <p className="text-gray-500 text-xs italic">Nessuna azione disponibile in questo luogo.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {availableActions.map(action => {
+                          const label = ACTION_LABELS[action.type]?.(action) ?? action.type
+                          const color = ACTION_COLORS[action.type] ?? 'bg-gray-700'
+                          return (
+                            <button key={action.i} onClick={() => handleCorvoActionClick(action)}
+                              className={`action-chip text-white border ${color} border-transparent hover:opacity-90 cursor-pointer ring-1 ring-white/10 text-[10px]`}>
+                              {label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <button onClick={() => { setCorvoUsed(true); setCorvoDestIdx(null); resetMode() }} className="btn-secondary text-xs self-start">Salta Azione</button>
+                  </div>
+                )
+              })()}
 
               {/* Pannello Aurora: posiziona eroe rivelato */}
               {mode === 'aurora_place_hero' && gameState.pendingFateReveal?.actorPlayerId === myPlayerId && (() => {

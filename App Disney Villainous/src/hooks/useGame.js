@@ -112,6 +112,7 @@ export function useGame(roomCode) {
     engine.gainPower,
     engine.removePower,
     engine.moveAllyOrItem,
+    engine.moveCorvoAlly,
     engine.vanquish,
   ]
 
@@ -236,6 +237,11 @@ export function useGame(roomCode) {
   // ── Move Ally or Item ───────────────────────────────────
   const moveAllyOrItem = useCallback((cardId, fromIdx, toIdx) => {
     return dispatch(engine.moveAllyOrItem, myPlayerId, cardId, fromIdx, toIdx)
+  }, [dispatch, myPlayerId])
+
+  // ── Move Corvo (Malefica) ───────────────────────────────
+  const moveCorvoAlly = useCallback((toIdx) => {
+    return dispatch(engine.moveCorvoAlly, myPlayerId, toIdx)
   }, [dispatch, myPlayerId])
 
   // ── Vanquish ────────────────────────────────────────────
@@ -364,6 +370,7 @@ export function useGame(roomCode) {
     playCardToLocation,
     discardCard,
     moveAllyOrItem,
+    moveCorvoAlly,
     vanquish,
     startFate,
     resolveFate,

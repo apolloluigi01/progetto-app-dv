@@ -41,6 +41,8 @@ export default function PlayerBoard({
     if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
     // Condizioni: selezione luogo per alleato gratuito o Ossessione
     if (activeMode === 'cond_play_ally_location' || activeMode === 'cond_ossessione_location') return true
+    // Corvo: selezione destinazione
+    if (activeMode === 'corvo_dest_pick') return true
     return false
   }
 
@@ -85,7 +87,7 @@ export default function PlayerBoard({
           const isVillainHere = player.currentLocation === i
           const isLocActive   = isActive && isVillainHere
           const isStaged      = isMyBoard && stagedLocation === i
-          const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.currentLocation
+          const isBlocked     = isMyBoard && isMyTurn && phase === 'move' && i === player.currentLocation && activeMode !== 'corvo_dest_pick'
           const isLocked      = locState.isLocked === true
           const clickable     = isLocClickable(i, locState)
 

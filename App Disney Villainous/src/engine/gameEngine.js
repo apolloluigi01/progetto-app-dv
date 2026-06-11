@@ -715,6 +715,26 @@ export function moveAllyOrItem(state, playerId, cardId, fromLocationIndex, toLoc
   return newState
 }
 
+/**
+ * Muove il Corvo (mal_a_cor) durante la fase 'move', prima che Malefica si sposti.
+ * Trova automaticamente il luogo corrente del Corvo e lo sposta al luogo adiacente indicato.
+ */
+export function moveCorvoAlly(state, playerId, toLocIdx) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato' }
+  const player = state.players[pidx]
+  if (player.villainId !== 'maleficent') return { error: 'Solo Malefica può muovere il Corvo.' }
+  if (state.phase !== 'move') return { error: 'Il Corvo può muoversi solo prima che Malefica si sposti.' }
+
+  let fromLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].allies.includes('mal_a_cor')) { fromLocIdx = i; break }
+  }
+  if (fromLocIdx < 0) return { error: 'Il Corvo non è presente nel Reame.' }
+
+  return moveAllyOrItem(state, playerId, 'mal_a_cor', fromLocIdx, toLocIdx)
+}
+
 // ─── AZIONE VANQUISH ─────────────────────────────────────────
 
 /**
@@ -1646,6 +1666,7 @@ export default {
   drawCards,
   discardCard,
   moveAllyOrItem,
+  moveCorvoAlly,
   vanquish,
   startFate,
   resolveFate,
