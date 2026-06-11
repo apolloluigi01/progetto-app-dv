@@ -36,9 +36,11 @@ export default function PlayerBoard({
   function isLocClickable(i, locState) {
     if (!onLocationClick) return false
     if (locState.isLocked) return false
-    if (!isMyBoard) return true // plancia avversario con fate_resolve
+    if (!isMyBoard) return true // plancia avversario: fate_resolve o condition fate
     if (phase === 'move') return i !== player.lastLocation
     if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
+    // Condizioni: selezione luogo per alleato gratuito o Ossessione
+    if (activeMode === 'cond_play_ally_location' || activeMode === 'cond_ossessione_location') return true
     return false
   }
 
@@ -130,10 +132,16 @@ export default function PlayerBoard({
 
                 const isCondition = card.type === 'condition'
 
-                // Carta cliccabile se siamo in modalità play_card o discard_mode
-                const isClickable = isMyTurn && (activeMode === 'play_card' || activeMode === 'discard_mode')
-                // Le Condizioni sono sempre non cliccabili nel proprio turno
-                const effectivelyClickable = isClickable && !isCondition
+                // Condizioni non giocabili in play_card; carte OK in discard_mode
+                // Durante il turno avversario: condizioni scartabili tramite effetto condizione
+                const isClickableMyTurn = isMyTurn && (activeMode === 'play_card' || activeMode === 'discard_mode')
+                  && (activeMode !== 'play_card' || !isCondition)
+                const isClickableCondEffect =
+                  !isMyTurn && (
+                    (activeMode === 'cond_discard_cards') ||
+                    (activeMode === 'cond_play_ally_pick' && card.type === 'ally')
+                  )
+                const effectivelyClickable = isClickableMyTurn || isClickableCondEffect
 
                 const isSel = selectedCardId === cardId
 
@@ -143,7 +151,7 @@ export default function PlayerBoard({
                     card={card}
                     selected={isSel}
                     playable={effectivelyClickable && !isSel}
-                    dimmed={isCondition && isMyTurn}
+                    dimmed={isCondition && isMyTurn && activeMode !== 'discard_mode'}
                     onClick={effectivelyClickable ? () => onHandCardClick?.(cardId) : undefined}
                   />
                 )

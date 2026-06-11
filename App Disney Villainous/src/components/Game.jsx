@@ -43,10 +43,9 @@ export default function Game() {
   const [stagedLocation, setStagedLocation] = useState(null)
   const [actionError,    setActionError]    = useState(null)
   const [uiMsg,          setUiMsg]          = useState(null)
-  // Fato: carta selezionata in attesa di conferma prima di giocarla
   const [fatePendingCard, setFatePendingCard] = useState(null)
-  // Condizioni: carta per cui si sta dichiarando il trigger
-  const [conditionDeclaring, setConditionDeclaring] = useState(null)
+  // Condizioni: dati locali per il flusso multi-step
+  const [condEffectData,  setCondEffectData]  = useState({})
 
   const isJoining = searchParams.get('join') === '1'
   const joinName  = searchParams.get('name') || ''
@@ -58,7 +57,11 @@ export default function Game() {
     moveVillain, gainPower, playCard, playCardToLocation,
     discardCard, moveAllyOrItem, vanquish,
     startFate, resolveFate, placeFateCard,
-    assignFateItem, declareConditionTrigger, playCondition,
+    assignFateItem,
+    requestConditionActivation, respondConditionActivation,
+    conditionDiscardCard, conditionDefeatHero, conditionDiscardOpponentItem,
+    conditionRecoverCard, conditionPlayAllyFree, conditionOssessioneResolve,
+    conditionFateOneCard, conditionSkipEffect,
     requestUndo, respondUndo,
     completeAction, endTurn,
   } = useGame(roomCode)
@@ -77,12 +80,24 @@ export default function Game() {
   useEffect(() => {
     setMode(null)
     setModeData({})
+    setCondEffectData({})
     setStagedLocation(null)
     setActionError(null)
     setUiMsg(null)
     setFatePendingCard(null)
-    setConditionDeclaring(null)
   }, [gameState?.currentPlayerIndex, gameState?.phase])
+
+  // Sincronizza mode con pendingConditionEffect
+  useEffect(() => {
+    const effect = gameState?.pendingConditionEffect
+    if (effect && effect.playerId === myPlayerId) {
+      if      (effect.type === 'discard_n_cards')  setMode('cond_discard_cards')
+      else if (effect.type === 'play_ally_free')    setMode('cond_play_ally_pick')
+      else if (effect.type === 'fate_one_card')     setMode('cond_fate_one_card')
+      else                                          setMode(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameState?.pendingConditionEffect?.type, gameState?.pendingConditionEffect?.playerId, myPlayerId])
 
   async function exec(fn, ...args) {
     setActionError(null)
@@ -263,7 +278,7 @@ export default function Game() {
 
   // ── Click su luogo (mia plancia) ─────────────────────────
   function handleMyLocationClick(idx) {
-    if (phase === 'move') {
+    if (isMyTurn && phase === 'move') {
       if (idx !== myPlayer.currentLocation) setStagedLocation(idx)
       return
     }
@@ -278,6 +293,10 @@ export default function Game() {
       setMode('move_ally_confirm')
       setModeData(prev => ({ ...prev, toLocIdx: idx, toLocName }))
     }
+    // Condizione: piazza alleato gratuito
+    if (mode === 'cond_play_ally_location') handleConditionAllyLocation(idx)
+    // Condizione: Ossessione — gioca eroe trovato
+    if (mode === 'cond_ossessione_location') handleConditionOssessioneLocation(idx)
   }
 
   // ── Conferma gioca alleato/oggetto in luogo ───────────────
@@ -400,16 +419,63 @@ export default function Game() {
     resetMode()
   }
 
-  // ── Condizione fuori turno: step 1 — dichiara trigger ────
-  async function handleDeclareCondition(cardId) {
-    const res = await exec(declareConditionTrigger, cardId)
-    if (!res?.error) setConditionDeclaring(cardId)
+  // ── Condizione: richiedi attivazione (turno avversario) ──
+  async function handleRequestCondition(cardId) {
+    await exec(requestConditionActivation, cardId)
   }
 
-  // ── Condizione fuori turno: step 2 — attiva ───────────────
-  async function handleActivateCondition(cardId) {
-    const res = await exec(playCondition, cardId)
-    if (!res?.error) setConditionDeclaring(null)
+  // ── Condizione: risposta avversario (conferma / nega) ─────
+  async function handleRespondCondition(approved) {
+    await exec(respondConditionActivation, approved)
+  }
+
+  // ── Condizione effect: scarta una carta (Tirannia) ────────
+  async function handleConditionDiscardCard(cardId) {
+    await exec(conditionDiscardCard, cardId)
+  }
+
+  // ── Condizione effect: sconfiggi Eroe ≤4 (Malignità) ─────
+  async function handleConditionDefeatHero(heroCardId) {
+    await exec(conditionDefeatHero, heroCardId)
+  }
+
+  // ── Condizione effect: scarta oggetto avversario (Jafar) ──
+  async function handleConditionDiscardItem(itemCardId, targetPlayerId, locationIndex) {
+    await exec(conditionDiscardOpponentItem, itemCardId, targetPlayerId, locationIndex)
+  }
+
+  // ── Condizione effect: recupera carta da scarti (Jafar) ───
+  async function handleConditionRecoverCard(cardId) {
+    await exec(conditionRecoverCard, cardId)
+  }
+
+  // ── Condizione effect: gioca alleato gratis ───────────────
+  async function handleConditionAllyPicked(allyCardId) {
+    setCondEffectData(prev => ({ ...prev, allyCardId }))
+    setMode('cond_play_ally_location')
+  }
+  async function handleConditionAllyLocation(locationIndex) {
+    const res = await exec(conditionPlayAllyFree, condEffectData.allyCardId, locationIndex)
+    if (!res?.error) { setMode(null); setCondEffectData({}) }
+  }
+
+  // ── Condizione effect: Ossessione ─────────────────────────
+  async function handleConditionOssessionePlay() {
+    setMode('cond_ossessione_location')
+  }
+  async function handleConditionOssessioneLocation(locationIndex) {
+    const res = await exec(conditionOssessioneResolve, true, locationIndex)
+    if (!res?.error) { setMode(null); setCondEffectData({}) }
+  }
+  async function handleConditionOssessioneDiscard() {
+    const res = await exec(conditionOssessioneResolve, false, null)
+    if (!res?.error) { setMode(null); setCondEffectData({}) }
+  }
+
+  // ── Condizione effect: Fato singolo (Ursula Inganno) ──────
+  async function handleConditionFateOneCardLocation(locationIndex) {
+    const res = await exec(conditionFateOneCard, locationIndex)
+    if (!res?.error) { setMode(null); setCondEffectData({}) }
   }
 
   // ── Banner stato turno ────────────────────────────────────
@@ -500,6 +566,33 @@ export default function Game() {
             </div>
           )}
 
+          {/* Modale: conferma condizione (visibile al giocatore IN TURNO) */}
+          {gameState.pendingConditionActivation && isMyTurn && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+              <div className="bg-gray-900 border border-rose-700/50 rounded-2xl p-6 max-w-sm w-full mx-4 flex flex-col gap-4 shadow-2xl">
+                <div className="text-3xl text-center">🎴</div>
+                <h3 className="font-display text-rose-300 font-bold text-lg text-center">Conferma Condizione</h3>
+                <p className="text-gray-300 text-sm text-center">
+                  <strong>{gameState.players.find(p => p.id === gameState.pendingConditionActivation.playerId)?.name}</strong>
+                  {' '}vuole attivare <strong>"{gameState.pendingConditionActivation.cardName}"</strong>.
+                </p>
+                {(() => {
+                  const owner = gameState.players.find(p => p.id === gameState.pendingConditionActivation.playerId)
+                  const v = VILLAINS[owner?.villainId]
+                  const card = v?.villainDeck.find(c => c.id === gameState.pendingConditionActivation.cardId)
+                  return card?.effect ? (
+                    <p className="text-gray-400 text-xs text-center italic bg-gray-800/50 rounded-lg px-3 py-2">{card.effect}</p>
+                  ) : null
+                })()}
+                <p className="text-gray-500 text-xs text-center">La condizione descritta si è verificata?</p>
+                <div className="flex gap-3 justify-center">
+                  <button onClick={() => handleRespondCondition(false)} className="btn-secondary text-sm px-5">✗ No</button>
+                  <button onClick={() => handleRespondCondition(true)}  className="btn-primary text-sm px-5">✓ Sì</button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Modale: approvazione undo (visibile ai NON richiedenti) */}
           {gameState.undoRequest &&
            gameState.undoRequest.requestingPlayerId !== myPlayerId &&
@@ -539,10 +632,18 @@ export default function Game() {
                 isMyTurn && phase === 'fate_resolve' &&
                 gameState.pendingInteraction?.type === 'place_fate_card' &&
                 gameState.pendingInteraction?.targetPlayerId === opp.id
+              // Condizione: Inganno Ursula — piazza carta fato sull'avversario
+              const isConditionFateTarget =
+                mode === 'cond_fate_one_card' &&
+                gameState.pendingConditionEffect?.playerId === myPlayerId &&
+                gameState.pendingConditionEffect?.targetPlayerId === opp.id
+              const oppClickHandler = isFateTarget ? handlePlaceFateCard
+                : isConditionFateTarget ? handleConditionFateOneCardLocation
+                : undefined
               return (
                 <PlayerBoard key={opp.id} player={opp} isMyBoard={false} isMyTurn={false}
                   phase={phase} actionQueue={[]} stagedLocation={null} selectedCardId={null}
-                  onLocationClick={isFateTarget ? handlePlaceFateCard : undefined}
+                  onLocationClick={oppClickHandler}
                 />
               )
             })}
@@ -609,9 +710,18 @@ export default function Game() {
                 stagedLocation={stagedLocation}
                 activeMode={mode}
                 selectedCardId={modeData.cardId || null}
-                onLocationClick={isMyTurn ? handleMyLocationClick : undefined}
+                onLocationClick={
+                  isMyTurn ? handleMyLocationClick :
+                  (mode === 'cond_play_ally_location' || mode === 'cond_ossessione_location') ? handleMyLocationClick :
+                  undefined
+                }
                 onActionClick={isMyTurn && phase === 'action' ? handleActionClick : undefined}
-                onHandCardClick={isMyTurn ? handleHandCardClick : undefined}
+                onHandCardClick={
+                  isMyTurn ? handleHandCardClick :
+                  mode === 'cond_discard_cards' ? handleConditionDiscardCard :
+                  mode === 'cond_play_ally_pick' ? handleConditionAllyPicked :
+                  undefined
+                }
                 onAllyItemClick={isMyTurn && mode === 'move_ally_pick' ? handleAllyItemClick : undefined}
               />
 
@@ -758,40 +868,199 @@ export default function Game() {
             </section>
           )}
 
-          {/* ── Condizioni fuori turno ── */}
-          {myConditions.length > 0 && (
+          {/* ── Condizioni fuori turno: pannello attivazione ── */}
+          {myConditions.length > 0 && !gameState.pendingConditionActivation && !gameState.pendingConditionEffect && (
             <section className="p-4 shrink-0">
               <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4">
                 <h3 className="font-display text-rose-300 font-bold mb-1 text-sm">
                   🎴 Condizioni — turno di {currentPlayer?.name}
                 </h3>
                 <p className="text-[11px] text-rose-400 mb-3">
-                  Verifica prima se la condizione si è verificata, poi attivala.
+                  Se la condizione si è verificata, premi "Attiva" — l'avversario la confermerà.
                 </p>
                 <div className="flex gap-3 flex-wrap">
-                  {myConditions.map(card => {
-                    const isTriggered = myPlayer?.conditionsTriggered?.includes(card.id)
-                    return (
-                      <div key={card.id} className="flex flex-col items-center gap-1">
-                        <Card card={card} small selected={conditionDeclaring === card.id || isTriggered} />
-                        {!isTriggered ? (
-                          <button onClick={() => handleDeclareCondition(card.id)}
-                                  className="btn-secondary text-[10px] px-3 py-1">
-                            📣 Dichiara Trigger
-                          </button>
-                        ) : (
-                          <button onClick={() => handleActivateCondition(card.id)}
-                                  className="btn-fate text-[10px] px-3 py-1">
-                            ✓ Attiva Condizione
-                          </button>
-                        )}
-                      </div>
-                    )
-                  })}
+                  {myConditions.map(card => (
+                    <div key={card.id} className="flex flex-col items-center gap-1">
+                      <Card card={card} small />
+                      <button onClick={() => handleRequestCondition(card.id)}
+                              className="btn-fate text-[10px] px-3 py-1">
+                        ⚡ Attiva
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             </section>
           )}
+
+          {/* ── Condizione in attesa: banner per il richiedente ── */}
+          {gameState.pendingConditionActivation &&
+           gameState.pendingConditionActivation.playerId === myPlayerId && (
+            <section className="p-4 shrink-0">
+              <div className="bg-rose-950/60 border border-rose-600 rounded-xl p-3 text-center">
+                <p className="text-rose-300 text-sm font-semibold">
+                  ⏳ "{gameState.pendingConditionActivation.cardName}" — in attesa di conferma da {currentPlayer?.name}…
+                </p>
+              </div>
+            </section>
+          )}
+
+          {/* ── Effetto condizione attivo (per il proprietario della condizione) ── */}
+          {gameState.pendingConditionEffect && gameState.pendingConditionEffect.playerId === myPlayerId && (() => {
+            const effect = gameState.pendingConditionEffect
+
+            if (effect.type === 'discard_n_cards') return (
+              <section className="p-4 shrink-0">
+                <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-4">
+                  <h3 className="font-display text-amber-300 font-bold mb-1 text-sm">
+                    🗑️ Tirannia: scarta {effect.count - effect.discarded} carta/e
+                  </h3>
+                  <p className="text-xs text-amber-400">Clicca le carte nella mano per scartarle ({effect.discarded}/{effect.count}).</p>
+                </div>
+              </section>
+            )
+
+            if (effect.type === 'defeat_hero_le4') {
+              const targets = myPlayer.board.locations.flatMap((loc, li) =>
+                loc.heroes.map(hId => {
+                  const hCard = findCardFromAll(gameState, hId)
+                  return hCard && (hCard.strength || 0) <= 4 ? { id: hId, name: hCard.name, strength: hCard.strength, locIdx: li } : null
+                }).filter(Boolean)
+              )
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-red-300 font-bold mb-2 text-sm">⚔️ Malignità: sconfiggi Eroe con Forza ≤4</h3>
+                    {targets.length === 0 ? (
+                      <><p className="text-xs text-red-400">Nessun Eroe con Forza ≤4 nel Reame.</p>
+                      <button onClick={() => exec(conditionSkipEffect)} className="btn-secondary text-xs mt-2 px-3">Salta</button></>
+                    ) : (
+                      <div className="flex gap-2 flex-wrap">
+                        {targets.map(t => (
+                          <button key={t.id} onClick={() => handleConditionDefeatHero(t.id)} className="btn-secondary text-xs px-3">
+                            ⚔️ {t.name} (F:{t.strength})
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )
+            }
+
+            if (effect.type === 'discard_opponent_item') {
+              const targetP = gameState.players.find(p => p.id === effect.targetPlayerId)
+              const tVillain = VILLAINS[targetP?.villainId]
+              const items = (targetP?.board.locations || []).flatMap((loc, li) =>
+                loc.items.map(iId => {
+                  const iCard = tVillain?.villainDeck.find(c => c.id === iId) || tVillain?.fateDeck.find(c => c.id === iId)
+                  return { id: iId, name: iCard?.name || iId, locIdx: li }
+                })
+              )
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-red-300 font-bold mb-2 text-sm">🗑️ Inganno: scarta Oggetto da {targetP?.name}</h3>
+                    {items.length === 0 ? (
+                      <><p className="text-xs text-red-400">Nessun Oggetto nel Reame di {targetP?.name}.</p>
+                      <button onClick={() => exec(conditionSkipEffect)} className="btn-secondary text-xs mt-2 px-3">Salta</button></>
+                    ) : (
+                      <div className="flex gap-2 flex-wrap">
+                        {items.map(it => (
+                          <button key={it.id} onClick={() => handleConditionDiscardItem(it.id, effect.targetPlayerId, it.locIdx)}
+                                  className="btn-secondary text-xs px-3">📦 {it.name}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )
+            }
+
+            if (effect.type === 'recover_from_discard') {
+              const discardItems = (myPlayer.villainDiscard || []).map(id => {
+                const c = myVillain?.villainDeck.find(x => x.id === id)
+                return c ? { id, name: c.name } : null
+              }).filter(Boolean)
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-blue-950/40 border border-blue-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-blue-300 font-bold mb-2 text-sm">♻️ Manipolazione: recupera dai scarti</h3>
+                    {discardItems.length === 0 ? (
+                      <><p className="text-xs text-blue-400">Nessuna carta negli scarti.</p>
+                      <button onClick={() => exec(conditionSkipEffect)} className="btn-secondary text-xs mt-2 px-3">Salta</button></>
+                    ) : (
+                      <div className="flex gap-2 flex-wrap">
+                        {discardItems.map(c => (
+                          <button key={c.id} onClick={() => handleConditionRecoverCard(c.id)} className="btn-secondary text-xs px-3">🃏 {c.name}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )
+            }
+
+            if (effect.type === 'play_ally_free') {
+              if (mode === 'cond_play_ally_location') return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-green-950/40 border border-green-700/50 rounded-xl p-4">
+                    <p className="text-xs text-green-300">Clicca un luogo sulla tua plancia dove giocare l'Alleato.</p>
+                    <button onClick={() => setMode('cond_play_ally_pick')} className="btn-secondary text-xs mt-2 px-3">← Torna</button>
+                  </div>
+                </section>
+              )
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-green-950/40 border border-green-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-green-300 font-bold mb-2 text-sm">🃏 Gioca un Alleato gratuitamente</h3>
+                    <p className="text-xs text-green-400">Clicca un Alleato dalla mano per selezionarlo, poi scegli il luogo.</p>
+                    <button onClick={() => exec(conditionSkipEffect)} className="btn-secondary text-xs mt-2 px-3">Salta</button>
+                  </div>
+                </section>
+              )
+            }
+
+            if (effect.type === 'ossessione_choice') {
+              const heroCard = findCardFromAll(gameState, effect.foundHeroId)
+              if (mode === 'cond_ossessione_location') return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4">
+                    <p className="text-xs text-rose-300">Clicca un luogo sulla tua plancia dove giocare "{heroCard?.name}".</p>
+                    <button onClick={() => setMode(null)} className="btn-secondary text-xs mt-2 px-3">← Annulla</button>
+                  </div>
+                </section>
+              )
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-rose-300 font-bold mb-2 text-sm">🔍 Ossessione: Eroe trovato</h3>
+                    {heroCard && <div className="mb-2"><Card card={heroCard} small /></div>}
+                    <div className="flex gap-2">
+                      <button onClick={handleConditionOssessionePlay} className="btn-fate text-xs px-3">▶ Gioca nel Reame</button>
+                      <button onClick={handleConditionOssessioneDiscard} className="btn-secondary text-xs px-3">🗑️ Scarta</button>
+                    </div>
+                  </div>
+                </section>
+              )
+            }
+
+            if (effect.type === 'fate_one_card') {
+              const fateCard = findCardFromAll(gameState, effect.revealedCardId)
+              const targetP = gameState.players.find(p => p.id === effect.targetPlayerId)
+              return (
+                <section className="p-4 shrink-0">
+                  <div className="bg-purple-950/40 border border-purple-700/50 rounded-xl p-4">
+                    <h3 className="font-display text-purple-300 font-bold mb-2 text-sm">🔮 Inganno: posiziona sul Reame di {targetP?.name}</h3>
+                    {fateCard && <div className="mb-2"><Card card={fateCard} small /></div>}
+                    <p className="text-xs text-purple-400">Clicca un luogo sulla plancia di {targetP?.name}.</p>
+                  </div>
+                </section>
+              )
+            }
+
+            return null
+          })()}
         </div>
 
         {/* ── COLONNA DESTRA: log ──────────────────────────── */}

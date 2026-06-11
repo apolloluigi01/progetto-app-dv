@@ -940,21 +940,40 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
   const fateCard = findFateCard(state, cardId)
   if (!fateCard) return { error: 'Carta Fato non trovata.' }
 
+  const villain = VILLAINS[target.villainId]
+
+  // ── Validazione restrizioni di luogo per gli Eroi
+  if (fateCard.type === 'hero') {
+    // Fuoco Verde: nessun Eroe può essere giocato qui
+    const hasFuocoVerde = loc.curses?.some(id => id.startsWith('mal_c_fuo'))
+    if (hasFuocoVerde) {
+      return { error: 'Fuoco Verde: nessun Eroe può essere giocato in questo luogo.' }
+    }
+    // Foresta di Rovi: solo Eroi con Forza ≥4 possono essere giocati qui
+    const hasForestaDiRovi = loc.curses?.some(id => id.startsWith('mal_c_roi'))
+    if (hasForestaDiRovi && (fateCard.strength || 0) < 4) {
+      return { error: `Foresta di Rovi: solo Eroi con Forza ≥4 possono essere giocati qui. ${fateCard.name} ha Forza ${fateCard.strength || 0}.` }
+    }
+    // Peter Pan: deve essere giocato all'Albero dell'Impiccato
+    if (cardId === 'fhk_peter' && target.villainId === 'hook') {
+      const alberoIdx = villain?.locations.findIndex(l => l.id === 'albero_impiccato') ?? -1
+      if (alberoIdx >= 0 && locationIndex !== alberoIdx) {
+        return { error: `Peter Pan deve essere giocato all'Albero dell'Impiccato.` }
+      }
+    }
+  }
+
   switch (fateCard.type) {
     case 'hero':
       loc.heroes.push(cardId)
-      // La copertura top-row viene aggiornata automaticamente dopo lo switch
       break
     case 'fate_item':
       loc.items.push(cardId)
       break
     case 'fate_effect':
-      // Gli effetti Fato si risolvono e vanno allo scarto — gestiti dalla UI
       target.fateDiscard.push(cardId)
       break
   }
-
-  const villain = VILLAINS[target.villainId]
 
   // Aggiorna copertura top-row se è stato aggiunto un Eroe
   if (fateCard.type === 'hero' && villain) {
@@ -964,26 +983,18 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
   const locName = villain?.locations[locationIndex]?.name || '?'
   const fateLogs = []
 
-  // ── Malefica: Aurora → scarta la Foresta di Rovi nel luogo in cui viene giocata
-  if (cardId === 'fmal_aurora' && target.villainId === 'maleficent') {
-    const foresteLoc = target.board.locations[locationIndex]
-    const forestaIdx = foresteLoc.curses.findIndex(id => id.startsWith('mal_c_roi'))
+  // ── Malefica: auto-scarto Foresta di Rovi quando Eroe Forza ≥4 viene giocato lì
+  if (fateCard.type === 'hero' && target.villainId === 'maleficent' && (fateCard.strength || 0) >= 4) {
+    const forestaIdx = loc.curses.findIndex(id => id.startsWith('mal_c_roi'))
     if (forestaIdx >= 0) {
-      const discarded = foresteLoc.curses.splice(forestaIdx, 1)[0]
+      const discarded = loc.curses.splice(forestaIdx, 1)[0]
       target.fateDiscard.push(discarded)
-      fateLogs.push(`Aurora scarta la Foresta di Rovi in "${locName}"!`)
+      fateLogs.push(`${fateCard.name} (Forza ${fateCard.strength}) scarta la Foresta di Rovi in "${locName}"!`)
     }
   }
 
-  // ── Malefica: Re Stefano → scarta Foresta di Rovi in questo luogo
+  // ── Malefica: Re Stefano → sposta Malefica (manuale)
   if (cardId === 'fmal_stefano' && target.villainId === 'maleficent') {
-    const stefanoLoc = target.board.locations[locationIndex]
-    const forestaIdx = stefanoLoc.curses.findIndex(id => id.startsWith('mal_c_roi'))
-    if (forestaIdx >= 0) {
-      const discarded = stefanoLoc.curses.splice(forestaIdx, 1)[0]
-      target.fateDiscard.push(discarded)
-      fateLogs.push(`Re Stefano scarta la Foresta di Rovi in "${locName}"!`)
-    }
     fateLogs.push(`Re Stefano: scegli un luogo dove spostare Malefica. Se ha Fuoco Verde, quella Maledizione verrà scartata.`)
   }
 
@@ -1084,64 +1095,295 @@ export function assignFateItem(state, targetPlayerId, itemCardId, heroCardId) {
   return newState
 }
 
-// ─── CONDIZIONI ─────────────────────────────────────────────
+// ─── CONDIZIONI (SISTEMA CONFERMA AVVERSARIO) ────────────────
 
 /**
- * Gioca una carta Condizione dalla mano durante il turno di un avversario.
- * Il giocatore deve dichiarare esplicitamente che il trigger si è verificato
- * (il sistema non può verificarlo automaticamente — testo libero sulle carte).
- * La condizione si resetta (non giocabile) a ogni fine turno: viene rimossa
- * da conditionsTriggered quando il turno passa al giocatore successivo.
+ * Il giocatore (non in turno) propone l'attivazione di una sua Condizione.
+ * L'avversario (giocatore in turno) dovrà confermare con respondConditionActivation.
  */
-export function declareConditionTrigger(state, playerId, cardId) {
+export function requestConditionActivation(state, playerId, cardId) {
   const pidx = getPlayerIndex(state, playerId)
   if (pidx < 0) return { error: 'Giocatore non trovato.' }
   if (state.currentPlayerIndex === pidx) {
-    return { error: 'Le Condizioni si dichiarano solo durante il turno avversario.' }
+    return { error: 'Le Condizioni si attivano solo durante il turno avversario.' }
   }
   const player  = state.players[pidx]
   const villain = VILLAINS[player.villainId]
   const card    = villain.villainDeck.find(c => c.id === cardId)
   if (!card || card.type !== 'condition') return { error: 'Carta non è una Condizione.' }
   if (!player.hand.includes(cardId))      return { error: 'Carta non in mano.' }
+  if (state.pendingConditionActivation)   return { error: 'C\'è già una condizione in attesa di conferma.' }
 
-  // Aggiunge la carta alla lista "trigger verificati in questo turno"
-  const newPlayers = deepClone(state.players)
-  const np = newPlayers[pidx]
-  if (!np.conditionsTriggered) np.conditionsTriggered = []
-  if (!np.conditionsTriggered.includes(cardId)) np.conditionsTriggered.push(cardId)
-
-  let newState = { ...state, players: newPlayers }
-  const card2 = villain.villainDeck.find(c => c.id === cardId)
-  newState = addLog(newState, `${player.name} dichiara la Condizione "${card2?.name}" come attivata.`, 'action')
+  let newState = { ...state, pendingConditionActivation: { playerId, cardId, cardName: card.name } }
+  newState = addLog(newState, `${player.name} vuole attivare "${card.name}". Avversario deve confermare.`, 'condition')
   return newState
 }
 
-export function playCondition(state, playerId, cardId) {
-  const pidx = getPlayerIndex(state, playerId)
-  if (pidx < 0) return { error: 'Giocatore non trovato.' }
-  if (state.currentPlayerIndex === pidx) {
-    return { error: 'Le Condizioni si giocano solo durante il turno avversario.' }
-  }
-  const player  = state.players[pidx]
-  const villain = VILLAINS[player.villainId]
-  const card    = villain.villainDeck.find(c => c.id === cardId)
-  if (!card || card.type !== 'condition') return { error: 'Carta non è una Condizione.' }
-  if (!player.hand.includes(cardId))      return { error: 'Carta non in mano.' }
+/**
+ * Il giocatore in turno conferma o nega la condizione.
+ * approved=true → effetto eseguito; approved=false → carta resta in mano.
+ */
+export function respondConditionActivation(state, responderId, approved) {
+  const pending = state.pendingConditionActivation
+  if (!pending) return { error: 'Nessuna condizione in attesa di conferma.' }
+  const currentPlayerId = state.players[state.currentPlayerIndex].id
+  if (responderId !== currentPlayerId) return { error: 'Solo il giocatore di turno può rispondere.' }
 
-  // Può essere giocata solo se il trigger è stato dichiarato in questo turno
-  if (!player.conditionsTriggered?.includes(cardId)) {
-    return { error: 'Devi prima dichiarare che il trigger si è verificato.' }
+  if (!approved) {
+    let newState = { ...state, pendingConditionActivation: null }
+    newState = addLog(newState, `"${pending.cardName}": condizione negata dall'avversario. Resta in mano.`, 'condition')
+    return newState
   }
 
   const newPlayers = deepClone(state.players)
+  const pidx = newPlayers.findIndex(p => p.id === pending.playerId)
   const np = newPlayers[pidx]
+  np.hand = np.hand.filter(id => id !== pending.cardId)
+  np.villainDiscard.push(pending.cardId)
+
+  const tidx = newPlayers.findIndex(p => p.id === state.players[state.currentPlayerIndex].id)
+  const turnPlayer = newPlayers[tidx]
+  const turnPlayerId = turnPlayer.id
+
+  let newState = { ...state, players: newPlayers, pendingConditionActivation: null }
+  let condEffect = null
+  const cid = pending.cardId
+
+  if (cid.startsWith('mal_k_tir')) {
+    if (np.villainDeck.length === 0) { np.villainDeck = shuffle([...np.villainDiscard]); np.villainDiscard = [] }
+    const drawn = np.villainDeck.splice(0, Math.min(3, np.villainDeck.length))
+    np.hand = [...np.hand, ...drawn]
+    condEffect = { type: 'discard_n_cards', playerId: pending.playerId, count: 3, discarded: 0 }
+    newState = addLog(newState, `Tirannia: ${np.name} pesca ${drawn.length} carte. Deve scartarne 3.`, 'condition')
+  } else if (cid.startsWith('mal_k_mal')) {
+    condEffect = { type: 'defeat_hero_le4', playerId: pending.playerId }
+    newState = addLog(newState, `Malignità: ${np.name} può sconfiggere un Eroe con Forza ≤4 nel suo Reame.`, 'condition')
+  } else if (cid.startsWith('jaf_k_ing')) {
+    condEffect = { type: 'discard_opponent_item', playerId: pending.playerId, targetPlayerId: turnPlayerId }
+    newState = addLog(newState, `Inganno: ${np.name} può scartare un Oggetto dal Reame di ${turnPlayer.name}.`, 'condition')
+  } else if (cid.startsWith('jaf_k_man')) {
+    condEffect = { type: 'recover_from_discard', playerId: pending.playerId }
+    newState = addLog(newState, `Manipolazione: ${np.name} può recuperare una carta dai propri scarti.`, 'condition')
+  } else if (cid.startsWith('hk_k_ast')) {
+    condEffect = { type: 'play_ally_free', playerId: pending.playerId }
+    newState = addLog(newState, `Astuzia: ${np.name} può giocare un Alleato gratuitamente.`, 'condition')
+  } else if (cid.startsWith('hk_k_oss')) {
+    const hkVillain = VILLAINS[np.villainId]
+    const discardedNonHero = []
+    let foundHeroId = null
+    for (const fid of np.fateDeck) {
+      const fc = hkVillain.fateDeck.find(c => c.id === fid)
+      if (fc?.type === 'hero') { foundHeroId = fid; break }
+      discardedNonHero.push(fid)
+    }
+    np.fateDeck = np.fateDeck.filter(id => !discardedNonHero.includes(id) && id !== foundHeroId)
+    np.fateDiscard = [...np.fateDiscard, ...discardedNonHero]
+    if (foundHeroId) {
+      condEffect = { type: 'ossessione_choice', playerId: pending.playerId, foundHeroId }
+      const heroName = hkVillain.fateDeck.find(c => c.id === foundHeroId)?.name || foundHeroId
+      newState = addLog(newState, `Ossessione: trovato "${heroName}". Scegli se giocarlo o scartarlo.`, 'condition')
+    } else {
+      newState = addLog(newState, `Ossessione: nessun Eroe trovato nel mazzo Fato.`, 'condition')
+    }
+  } else if (cid.startsWith('urs_k_arr')) {
+    if (np.villainDeck.length < 3) { np.villainDeck = [...np.villainDeck, ...shuffle([...np.villainDiscard])]; np.villainDiscard = [] }
+    const drawn = np.villainDeck.splice(0, Math.min(3, np.villainDeck.length))
+    np.hand = [...np.hand, ...drawn]
+    newState = addLog(newState, `Arroganza: ${np.name} pesca ${drawn.length} carte.`, 'condition')
+  } else if (cid.startsWith('urs_k_ing')) {
+    // Rivela la prima carta del mazzo Fato dell'avversario
+    if (turnPlayer.fateDeck.length === 0) { turnPlayer.fateDeck = shuffle([...turnPlayer.fateDiscard]); turnPlayer.fateDiscard = [] }
+    if (turnPlayer.fateDeck.length > 0) {
+      const revealedCardId = turnPlayer.fateDeck.shift()
+      condEffect = { type: 'fate_one_card', playerId: pending.playerId, targetPlayerId: turnPlayerId, revealedCardId }
+      const fc = findFateCard(state, revealedCardId)
+      newState = addLog(newState, `Inganno: rivelata "${fc?.name || revealedCardId}" dal mazzo Fato di ${turnPlayer.name}.`, 'condition')
+    } else {
+      newState = addLog(newState, `Inganno: mazzo Fato di ${turnPlayer.name} esaurito. Nessun effetto.`, 'condition')
+    }
+  } else if (cid.startsWith('pj_k_cod')) {
+    condEffect = { type: 'play_ally_free', playerId: pending.playerId }
+    newState = addLog(newState, `Codardia: ${np.name} può giocare un Alleato gratuitamente.`, 'condition')
+  } else if (cid.startsWith('pj_k_avi')) {
+    const gain = Math.min(turnPlayer.power || 0, 6)
+    np.power = (np.power || 0) + gain
+    newState = addLog(newState, `Avidità: ${np.name} guadagna ${gain} Potere (uguale a ${turnPlayer.name}).`, 'condition')
+  } else if (cid.startsWith('qh_k_fur')) {
+    np.power = (np.power || 0) + 3
+    newState = addLog(newState, `Furia: ${np.name} guadagna 3 Potere.`, 'condition')
+  } else if (cid.startsWith('qh_k_pro')) {
+    const allyCount = turnPlayer.board.locations.reduce((sum, loc) => sum + loc.allies.length, 0)
+    np.power = (np.power || 0) + allyCount
+    newState = addLog(newState, `Processo: ${np.name} guadagna ${allyCount} Potere (${allyCount} Alleati di ${turnPlayer.name}).`, 'condition')
+  }
+
+  if (condEffect) newState = { ...newState, pendingConditionEffect: condEffect }
+  newState = addLog(newState, `"${pending.cardName}" attivata da ${np.name}!`, 'condition')
+  return newState
+}
+
+/** Risolve: scarta una carta dalla mano (Tirannia — scarta 3). */
+export function conditionDiscardCard(state, playerId, cardId) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'discard_n_cards') return { error: 'Nessun effetto "scarta N carte" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore che deve scartare.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  if (!np.hand.includes(cardId)) return { error: 'Carta non in mano.' }
   np.hand = np.hand.filter(id => id !== cardId)
   np.villainDiscard.push(cardId)
-  np.conditionsTriggered = (np.conditionsTriggered || []).filter(id => id !== cardId)
+  const newDiscarded = effect.discarded + 1
+  const newEffect = newDiscarded >= effect.count ? null : { ...effect, discarded: newDiscarded }
+  const villain = VILLAINS[np.villainId]
+  const card = villain.villainDeck.find(c => c.id === cardId)
+  let newState = { ...state, players: newPlayers, pendingConditionEffect: newEffect }
+  newState = addLog(newState, `${np.name} scarta "${card?.name || cardId}" (${newDiscarded}/${effect.count}).`, 'action')
+  return newState
+}
 
-  let newState = { ...state, players: newPlayers }
-  newState = addLog(newState, `${player.name} attiva la Condizione "${card.name}"!`, 'action')
+/** Risolve: sconfiggi un Eroe con Forza ≤4 (Malignità). */
+export function conditionDefeatHero(state, playerId, heroCardId) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'defeat_hero_le4') return { error: 'Nessun effetto "sconfiggi eroe" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  let heroLocIdx = -1
+  for (let i = 0; i < np.board.locations.length; i++) {
+    if (np.board.locations[i].heroes.includes(heroCardId)) { heroLocIdx = i; break }
+  }
+  if (heroLocIdx < 0) return { error: 'Eroe non trovato nel Reame.' }
+  const villain = VILLAINS[np.villainId]
+  const heroCard = villain.fateDeck.find(c => c.id === heroCardId)
+  if ((heroCard?.strength || 0) > 4) return { error: 'L\'Eroe ha Forza > 4: Malignità può sconfiggere solo Eroi con Forza ≤4.' }
+  np.board.locations[heroLocIdx].heroes = np.board.locations[heroLocIdx].heroes.filter(id => id !== heroCardId)
+  np.fateDiscard.push(heroCardId)
+  updateCoveredActions(np, heroLocIdx, villain)
+  let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+  newState = addLog(newState, `Malignità: "${heroCard?.name}" (Forza ${heroCard?.strength}) sconfitto!`, 'condition')
+  return newState
+}
+
+/** Risolve: scarta un Oggetto dal Reame avversario (Jafar Inganno). */
+export function conditionDiscardOpponentItem(state, playerId, itemCardId, targetPlayerId, locationIndex) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'discard_opponent_item') return { error: 'Nessun effetto "scarta oggetto avversario" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+  const loc = target.board.locations[locationIndex]
+  if (!loc) return { error: 'Luogo non trovato.' }
+  if (!loc.items.includes(itemCardId)) return { error: 'Oggetto non in questo luogo.' }
+  loc.items = loc.items.filter(id => id !== itemCardId)
+  // Rimuovi eventuali assegnazioni di questo oggetto agli Eroi
+  if (loc.fateItemAssignments) {
+    for (const heroId of Object.keys(loc.fateItemAssignments)) {
+      if (loc.fateItemAssignments[heroId] === itemCardId) delete loc.fateItemAssignments[heroId]
+    }
+  }
+  target.villainDiscard.push(itemCardId)
+  const villain = VILLAINS[target.villainId]
+  const itemCard = villain?.villainDeck.find(c => c.id === itemCardId) || villain?.fateDeck.find(c => c.id === itemCardId)
+  let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+  newState = addLog(newState, `Inganno: "${itemCard?.name || itemCardId}" scartato dal Reame di ${target.name}.`, 'condition')
+  return newState
+}
+
+/** Risolve: recupera una carta dagli scarti (Jafar Manipolazione). */
+export function conditionRecoverCard(state, playerId, cardId) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'recover_from_discard') return { error: 'Nessun effetto "recupera carta" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  if (!np.villainDiscard.includes(cardId)) return { error: 'Carta non nella pila degli scarti.' }
+  np.villainDiscard = np.villainDiscard.filter(id => id !== cardId)
+  np.hand.push(cardId)
+  const villain = VILLAINS[np.villainId]
+  const card = villain.villainDeck.find(c => c.id === cardId)
+  let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+  newState = addLog(newState, `Manipolazione: "${card?.name || cardId}" recuperato dagli scarti di ${np.name}.`, 'condition')
+  return newState
+}
+
+/** Risolve: gioca un Alleato gratuitamente (Astuzia/Codardia). */
+export function conditionPlayAllyFree(state, playerId, allyCardId, locationIndex) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'play_ally_free') return { error: 'Nessun effetto "gioca alleato gratis" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const villain = VILLAINS[np.villainId]
+  const card = villain.villainDeck.find(c => c.id === allyCardId)
+  if (!card || card.type !== 'ally') return { error: 'La carta non è un Alleato.' }
+  if (!np.hand.includes(allyCardId)) return { error: 'Alleato non in mano.' }
+  const loc = np.board.locations[locationIndex]
+  if (!loc) return { error: 'Luogo non trovato.' }
+  np.hand = np.hand.filter(id => id !== allyCardId)
+  loc.allies.push(allyCardId)
+  const locName = villain.locations[locationIndex]?.name || '?'
+  let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+  newState = addLog(newState, `${np.name} gioca "${card.name}" gratuitamente in "${locName}".`, 'condition')
+  return newState
+}
+
+/** Risolve Ossessione: gioca o scarta l'Eroe trovato. */
+export function conditionOssessioneResolve(state, playerId, playHero, locationIndex) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'ossessione_choice') return { error: 'Nessun effetto Ossessione in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const villain = VILLAINS[np.villainId]
+  const heroCard = villain.fateDeck.find(c => c.id === effect.foundHeroId)
+  if (playHero) {
+    if (locationIndex === undefined || locationIndex === null) return { error: 'Scegli un luogo dove giocare l\'Eroe.' }
+    const loc = np.board.locations[locationIndex]
+    if (!loc) return { error: 'Luogo non trovato.' }
+    loc.heroes.push(effect.foundHeroId)
+    updateCoveredActions(np, locationIndex, villain)
+    const locName = villain.locations[locationIndex]?.name || '?'
+    let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+    newState = addLog(newState, `Ossessione: "${heroCard?.name}" giocato in "${locName}".`, 'condition')
+    return newState
+  } else {
+    np.fateDiscard.push(effect.foundHeroId)
+    let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
+    newState = addLog(newState, `Ossessione: "${heroCard?.name}" scartato.`, 'condition')
+    return newState
+  }
+}
+
+/** Risolve Inganno Ursula: posiziona la carta Fato rivelata. */
+export function conditionFateOneCard(state, playerId, locationIndex) {
+  const effect = state.pendingConditionEffect
+  if (!effect || effect.type !== 'fate_one_card') return { error: 'Nessun effetto "fato singolo" in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const result = placeFateCard(state, effect.revealedCardId, effect.targetPlayerId, locationIndex)
+  if (result?.error) return result
+  return { ...result, pendingConditionEffect: null }
+}
+
+/** Salta/chiude l'effetto condizione corrente. */
+export function conditionSkipEffect(state, playerId) {
+  const effect = state.pendingConditionEffect
+  if (!effect) return { error: 'Nessun effetto condizione in corso.' }
+  if (effect.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const player = getPlayerById(state, playerId)
+  let newState = { ...state, pendingConditionEffect: null }
+  newState = addLog(newState, `Effetto condizione saltato da ${player?.name || playerId}.`, 'condition')
   return newState
 }
 
@@ -1226,11 +1468,8 @@ export function endTurn(state) {
   // Pesca
   let newState = drawCards(state, currentPlayer.id)
 
-  // Resetta conditionsTriggered per tutti i giocatori (le condizioni non giocate si azzerano)
-  const resetPlayers = newState.players.map(p => ({
-    ...p,
-    conditionsTriggered: [],
-  }))
+  // Resetta conditionsTriggered per tutti i giocatori
+  const resetPlayers = newState.players.map(p => ({ ...p, conditionsTriggered: [] }))
   newState = { ...newState, players: resetPlayers }
 
   // Passa al prossimo giocatore
@@ -1242,8 +1481,10 @@ export function endTurn(state) {
     actionQueue: [],
     pendingFate: null,
     pendingInteraction: null,
+    pendingConditionActivation: null,
+    pendingConditionEffect: null,
     undoRequest: null,
-    undoSnapshot: null, // resetta snapshot a ogni cambio di turno
+    undoSnapshot: null,
   }
 
   const nextPlayer = newState.players[nextIndex]
@@ -1365,8 +1606,16 @@ export default {
   resolveFate,
   placeFateCard,
   assignFateItem,
-  declareConditionTrigger,
-  playCondition,
+  requestConditionActivation,
+  respondConditionActivation,
+  conditionDiscardCard,
+  conditionDefeatHero,
+  conditionDiscardOpponentItem,
+  conditionRecoverCard,
+  conditionPlayAllyFree,
+  conditionOssessioneResolve,
+  conditionFateOneCard,
+  conditionSkipEffect,
   requestUndo,
   respondUndo,
   endTurn,

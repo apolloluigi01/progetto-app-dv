@@ -68,11 +68,6 @@ export default function VillainSelect({ gameState, myPlayerId, isHost, roomCode,
                 </div>
               </div>
 
-              {/* Stats */}
-              <div className="flex gap-3 mt-3 pt-3 border-t border-gray-800 text-xs text-gray-500">
-                <span>⚡ Potere iniziale: <strong className="text-yellow-400">{villain.startingPower}</strong></span>
-                <span>🃏 Mano: <strong className="text-blue-400">{villain.handSize}</strong></span>
-              </div>
             </button>
           )
         })}

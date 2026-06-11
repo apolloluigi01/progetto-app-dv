@@ -254,12 +254,44 @@ export function useGame(roomCode) {
   }, [dispatch])
 
   // ── Condizioni ───────────────────────────────────────────
-  const declareConditionTrigger = useCallback((cardId) => {
-    return dispatch(engine.declareConditionTrigger, myPlayerId, cardId)
+  const requestConditionActivation = useCallback((cardId) => {
+    return dispatch(engine.requestConditionActivation, myPlayerId, cardId)
   }, [dispatch, myPlayerId])
 
-  const playCondition = useCallback((cardId) => {
-    return dispatch(engine.playCondition, myPlayerId, cardId)
+  const respondConditionActivation = useCallback((approved) => {
+    return dispatch(engine.respondConditionActivation, myPlayerId, approved)
+  }, [dispatch, myPlayerId])
+
+  const conditionDiscardCard = useCallback((cardId) => {
+    return dispatch(engine.conditionDiscardCard, myPlayerId, cardId)
+  }, [dispatch, myPlayerId])
+
+  const conditionDefeatHero = useCallback((heroCardId) => {
+    return dispatch(engine.conditionDefeatHero, myPlayerId, heroCardId)
+  }, [dispatch, myPlayerId])
+
+  const conditionDiscardOpponentItem = useCallback((itemCardId, targetPlayerId, locationIndex) => {
+    return dispatch(engine.conditionDiscardOpponentItem, myPlayerId, itemCardId, targetPlayerId, locationIndex)
+  }, [dispatch, myPlayerId])
+
+  const conditionRecoverCard = useCallback((cardId) => {
+    return dispatch(engine.conditionRecoverCard, myPlayerId, cardId)
+  }, [dispatch, myPlayerId])
+
+  const conditionPlayAllyFree = useCallback((allyCardId, locationIndex) => {
+    return dispatch(engine.conditionPlayAllyFree, myPlayerId, allyCardId, locationIndex)
+  }, [dispatch, myPlayerId])
+
+  const conditionOssessioneResolve = useCallback((playHero, locationIndex) => {
+    return dispatch(engine.conditionOssessioneResolve, myPlayerId, playHero, locationIndex)
+  }, [dispatch, myPlayerId])
+
+  const conditionFateOneCard = useCallback((locationIndex) => {
+    return dispatch(engine.conditionFateOneCard, myPlayerId, locationIndex)
+  }, [dispatch, myPlayerId])
+
+  const conditionSkipEffect = useCallback(() => {
+    return dispatch(engine.conditionSkipEffect, myPlayerId)
   }, [dispatch, myPlayerId])
 
   // ── Undo ─────────────────────────────────────────────────
@@ -319,8 +351,16 @@ export function useGame(roomCode) {
     resolveFate,
     placeFateCard,
     assignFateItem,
-    declareConditionTrigger,
-    playCondition,
+    requestConditionActivation,
+    respondConditionActivation,
+    conditionDiscardCard,
+    conditionDefeatHero,
+    conditionDiscardOpponentItem,
+    conditionRecoverCard,
+    conditionPlayAllyFree,
+    conditionOssessioneResolve,
+    conditionFateOneCard,
+    conditionSkipEffect,
     requestUndo,
     respondUndo,
     completeAction,
