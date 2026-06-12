@@ -131,6 +131,28 @@ Ogni nuova carta con effetti obbligatori DEVE avere la sua logica aggiunta in qu
 - Meccaniche carte speciali per villain non ancora implementate
 - Varie fix su carte singole da scoprire durante il testing
 
+## Procedura post-modifica (OBBLIGATORIA dopo ogni sessione di lavoro)
+
+Dopo ogni modifica al progetto eseguire automaticamente, nell'ordine:
+
+```
+1. git add <file modificati>
+2. git commit -m "descrizione significativa"
+3. git push origin main          ← GitHub aggiornato
+4. Vercel rileva il push e fa il deploy automatico in produzione
+```
+
+Vercel è collegato al repo GitHub con **auto-deploy su push a `main`**:
+non serve lanciare `vercel --prod` manualmente — il push è sufficiente.
+
+Verificare l'esito del deploy tramite le API Vercel MCP (`list_deployments`) o
+aprendo il link dell'inspector restituito dall'ultimo deployment.
+
+Aggiornare anche questo file (CLAUDE.md):
+- sezione "Ultimo aggiornamento dati carte" con data e descrizione della modifica
+- sezione "Known issues attivi" se un bug è stato risolto
+- sezione "Stato funzionalità core" se una feature è completa
+
 ## Come lavorare in questa codebase
 - Leggi sempre questo file prima di iniziare qualsiasi task
 - Per ogni fix su una carta specifica, chiedi il testo ufficiale della carta se non è già in `src/data/`
