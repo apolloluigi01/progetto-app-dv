@@ -533,6 +533,15 @@ export function canPlayCard(state, playerId, cardId) {
     }
   }
 
+  // ────────────────────────────────────────────────────────────
+  // GENERICO: Oggetti con "Assegna a un Eroe" → almeno 1 Eroe nel Reame
+  // ────────────────────────────────────────────────────────────
+  if (card.type === 'item' && card.effect?.includes('Assegna a un Eroe')) {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: `"${card.name}": deve esserci almeno un Eroe nel Reame a cui assegnare questo Oggetto.` }
+    }
+  }
+
   return { canPlay: true }
 }
 
@@ -1157,6 +1166,13 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
       if (alberoIdx >= 0 && locationIndex !== alberoIdx) {
         return { error: `Peter Pan deve essere giocato all'Albero dell'Impiccato.` }
       }
+    }
+  }
+
+  // Fate item con "Assegna a un Eroe": la location scelta deve avere almeno 1 Eroe
+  if (fateCard.type === 'fate_item' && fateCard.effect?.includes('Assegna a un Eroe')) {
+    if (loc.heroes.length === 0) {
+      return { error: `"${fateCard.name}" deve essere assegnato a un Eroe: non ci sono Eroi in questo Luogo. Scegli un Luogo che abbia almeno un Eroe.` }
     }
   }
 

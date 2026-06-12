@@ -46,6 +46,7 @@ export default function Game() {
   const [fatePendingCard, setFatePendingCard] = useState(null)
   // Condizioni: dati locali per il flusso multi-step
   const [condEffectData,  setCondEffectData]  = useState({})
+  const [logOpen,         setLogOpen]         = useState(false)
 
   const isJoining = searchParams.get('join') === '1'
   const joinName  = searchParams.get('name') || ''
@@ -245,14 +246,15 @@ export default function Game() {
     } else if (action.type === 'activate') {
       const allVCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
       const activatable = myPlayer.board.locations.flatMap(loc =>
-        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('Attivazione'))
+        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('[Attiva]'))
       )
       if (activatable.length === 0) {
-        setActionError('Nessun alleato/oggetto attivabile nel Reame.')
+        setActionError('Non ci sono carte attivabili nel reame.')
+        await exec(completeAction, actionIndex)
       } else {
-        setUiMsg(`Attiva: ${activatable.map(c => `"${c.name}"`).join(', ')}. Esegui l'abilità manualmente.`)
+        setMode('activate_mode')
+        setModeData({ actionIndex, activatable })
       }
-      await exec(completeAction, actionIndex)
 
     } else if (action.type === 'move_hero') {
       setUiMsg('Muovi Eroe: sposta un Eroe della plancia avversaria in un luogo adiacente (operazione manuale).')
@@ -413,14 +415,35 @@ export default function Game() {
     } else if (action.type === 'activate') {
       const allVCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
       const activatable = myPlayer.board.locations.flatMap(loc =>
-        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('Attivazione'))
+        [...loc.allies, ...loc.items].map(id => allVCards.find(c => c.id === id)).filter(c => c?.effect?.includes('[Attiva]'))
       )
-      if (activatable.length === 0) setActionError('Nessun alleato/oggetto attivabile nel Reame.')
-      else setUiMsg(`Corvo — Attiva: ${activatable.map(c => `"${c.name}"`).join(', ')}. Esegui manualmente.`)
-      doneCorvo()
+      if (activatable.length === 0) {
+        setActionError('Non ci sono carte attivabili nel reame.')
+        doneCorvo()
+      } else {
+        setMode('activate_mode')
+        setModeData({ isCorvoAction: true, activatable })
+      }
     } else {
       doneCorvo()
     }
+  }
+
+  // ── Attiva: seleziona e conferma carta ──────────────────
+  function handleActivateCard(cardId) {
+    const card = modeData.activatable?.find(c => c.id === cardId)
+    setModeData(prev => ({ ...prev, selectedActivateId: cardId, selectedActivateName: card?.name || cardId, selectedActivateEffect: card?.effect || '' }))
+    setMode('activate_confirm')
+  }
+
+  async function handleConfirmActivate() {
+    if (modeData.isCorvoAction) {
+      setCorvoUsed(true)
+      setCorvoDestIdx(null)
+    } else {
+      await exec(completeAction, modeData.actionIndex)
+    }
+    resetMode()
   }
 
   // ── Conferma spostamento alleato/oggetto ──────────────────
@@ -501,11 +524,11 @@ export default function Game() {
       const targetP = gameState.players.find(p => p.id === pi.targetPlayerId)
       const card    = VILLAINS[targetP?.villainId]?.fateDeck.find(c => c.id === pi.cardId)
       if (card?.type === 'fate_item') {
-        // Usa lo stato aggiornato per leggere il luogo
         const locHeroes = targetP?.board.locations[locationIndex]?.heroes || []
-        if (locHeroes.length > 0) {
+        const isMandatory = card.effect?.includes('Assegna a un Eroe')
+        if (isMandatory || locHeroes.length > 0) {
           setMode('assign_fate_item')
-          setModeData({ itemCardId: pi.cardId, itemName: card.name, targetPlayerId: pi.targetPlayerId, locationIndex })
+          setModeData({ itemCardId: pi.cardId, itemName: card.name, targetPlayerId: pi.targetPlayerId, locationIndex, isMandatory })
         }
       }
     }
@@ -650,6 +673,10 @@ export default function Game() {
               Fine Turno →
             </button>
           )}
+          <button onClick={() => setLogOpen(o => !o)}
+                  className="btn-secondary text-xs px-3 py-1.5 border-gray-700 text-gray-400">
+            {logOpen ? '📋 ✕ Log' : '📋 Log'}
+          </button>
         </div>
       </header>
 
@@ -964,6 +991,39 @@ export default function Game() {
                 </div>
               )}
 
+              {/* Panel: attiva — selezione carta */}
+              {isMyTurn && mode === 'activate_mode' && (
+                <div className="bg-teal-950/40 border border-teal-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-teal-300 font-bold text-sm">⚡ Attiva — Scegli la carta</h3>
+                  <p className="text-xs text-teal-400">Seleziona la carta che vuoi attivare.</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {(modeData.activatable || []).map(card => (
+                      <button key={card.id} onClick={() => handleActivateCard(card.id)}
+                              className="btn-secondary text-xs px-3">
+                        ⚡ {card.name}
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => { if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) } else exec(completeAction, modeData.actionIndex); resetMode() }}
+                          className="btn-secondary text-xs px-3 self-start">Annulla</button>
+                </div>
+              )}
+
+              {/* Panel: attiva — conferma effetto */}
+              {isMyTurn && mode === 'activate_confirm' && (
+                <div className="bg-teal-950/40 border border-teal-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-teal-300 font-bold text-sm">⚡ Attiva — "{modeData.selectedActivateName}"</h3>
+                  <p className="text-xs text-teal-200 bg-teal-900/30 rounded-lg px-3 py-2 italic">
+                    {modeData.selectedActivateEffect || '(effetto non disponibile)'}
+                  </p>
+                  <p className="text-[11px] text-teal-500">Esegui l'effetto descritto, poi conferma.</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => setMode('activate_mode')} className="btn-secondary text-xs px-3">← Torna</button>
+                    <button onClick={handleConfirmActivate} className="btn-primary text-xs px-4">✓ Effetto Eseguito</button>
+                  </div>
+                </div>
+              )}
+
               {/* Panel: scontro */}
               {isMyTurn && mode === 'vanquish_mode' && (
                 <VanquishPanel
@@ -1053,7 +1113,9 @@ export default function Game() {
                           )
                         })
                       })()}
-                      <button onClick={resetMode} className="btn-secondary text-xs px-3">Salta</button>
+                      {!modeData.isMandatory && (
+                        <button onClick={resetMode} className="btn-secondary text-xs px-3">Salta</button>
+                      )}
                     </div>
                   </>
                 ) : (
@@ -1264,7 +1326,7 @@ export default function Game() {
         </div>
 
         {/* ── COLONNA DESTRA: log ──────────────────────────── */}
-        <aside className="w-72 xl:w-80 border-l border-gray-800 flex flex-col bg-gray-950/60 shrink-0">
+        {logOpen && <aside className="w-72 xl:w-80 border-l border-gray-800 flex flex-col bg-gray-950/60 shrink-0">
           <div className="px-3 py-2 border-b border-gray-800 shrink-0">
             <p className="text-[10px] font-display text-gray-600 uppercase tracking-widest">Log di Gioco</p>
           </div>
@@ -1292,7 +1354,7 @@ export default function Game() {
               )
             })}
           </div>
-        </aside>
+        </aside>}
       </div>
     </div>
   )

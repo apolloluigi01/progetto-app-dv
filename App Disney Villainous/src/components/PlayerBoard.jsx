@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { VILLAINS } from '../data/villains.js'
 import Location from './Location.jsx'
 import Card from './Card.jsx'
@@ -30,6 +31,8 @@ export default function PlayerBoard({
 
   const allCards = [...villain.villainDeck, ...villain.fateDeck]
   const findCard = (id) => allCards.find(c => c.id === id)
+
+  const [discardOpen, setDiscardOpen] = useState(null) // null | 'villain' | 'fate'
 
   const isActive = isMyBoard && isMyTurn && phase === 'action'
 
@@ -70,6 +73,22 @@ export default function PlayerBoard({
           <div className="text-gray-600 text-xs text-right hidden sm:block">
             <div>🃏 {player.hand?.length ?? 0} mano</div>
             <div>📚 {player.villainDeck?.length ?? 0} mazzo</div>
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setDiscardOpen(d => d === 'villain' ? null : 'villain')}
+              className="text-[10px] px-2 py-0.5 rounded border border-gray-700 bg-gray-900 text-gray-400 hover:border-gray-500"
+              title="Pila scarti Villain"
+            >
+              🗑️V {player.villainDiscard?.length ?? 0}
+            </button>
+            <button
+              onClick={() => setDiscardOpen(d => d === 'fate' ? null : 'fate')}
+              className="text-[10px] px-2 py-0.5 rounded border border-gray-700 bg-gray-900 text-gray-400 hover:border-gray-500"
+              title="Pila scarti Fato"
+            >
+              🗑️F {player.fateDiscard?.length ?? 0}
+            </button>
           </div>
         </div>
       </div>
@@ -118,6 +137,34 @@ export default function PlayerBoard({
           )
         })}
       </div>
+
+      {/* ── Pile degli scarti (visualizzazione) ── */}
+      {discardOpen && (() => {
+        const isVillain = discardOpen === 'villain'
+        const pile = isVillain ? (player.villainDiscard || []) : (player.fateDiscard || [])
+        const title = isVillain ? 'Scarti Villain' : 'Scarti Fato'
+        return (
+          <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-display text-gray-400 uppercase tracking-wider">
+                🗑️ {title} — {player.name} ({pile.length} carte)
+              </p>
+              <button onClick={() => setDiscardOpen(null)} className="text-gray-600 hover:text-gray-400 text-xs">✕</button>
+            </div>
+            {pile.length === 0 ? (
+              <p className="text-gray-600 text-xs italic">Pila vuota.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {[...pile].reverse().map((cardId, idx) => {
+                  const card = findCard(cardId)
+                  if (!card) return <span key={idx} className="text-gray-600 text-xs">{cardId}</span>
+                  return <Card key={idx} card={card} small showEffect={false} />
+                })}
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* ── Mano (solo sulla propria plancia) ── */}
       {isMyBoard && (
