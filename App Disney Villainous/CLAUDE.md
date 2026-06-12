@@ -27,6 +27,7 @@ supabase/
 
 ## Ultimo aggiornamento dati carte
 2026-06-12 — aggiornati costi, forze, nomi ed effetti di tutte le carte dei 6 villain base in `src/data/villains.js` per allineamento al testo ufficiale Ravensburger.
+2026-06-12 — implementata regola "puoi" in `gameEngine.js` (`canPlayCard`): effetti obbligatori bloccano la giocata se le pre-condizioni non sono soddisfatte.
 
 ## Villain implementati (tutti in versione bozza — da migliorare)
 - [ ] Capitan Uncino
@@ -81,6 +82,42 @@ supabase/
 - Ogni fix deve essere un file completo e copiabile senza modifiche
 - Se una modifica tocca `gameEngine.js`, segnalalo esplicitamente prima di procedere
 - Non modificare `supabase/schema.sql` senza approvazione esplicita
+
+## Regola "puoi" — obbligatorietà degli effetti (FONDAMENTALE, vale per TUTTE le carte)
+
+Questa regola si applica a ogni carta villain e fate, presente e futura.
+
+**Principio:** la parola "puoi" nell'effetto di una carta rende l'azione FACOLTATIVA.
+Se "puoi" è assente, l'azione è OBBLIGATORIA.
+
+**Conseguenza diretta:** una carta con effetto obbligatorio NON PUÒ essere giocata
+se la sua pre-condizione non è soddisfatta dallo stato del gioco.
+
+| Testo effetto | Tipo | Comportamento |
+|---|---|---|
+| "Scarta un Alleato o un Oggetto e ottieni 3 Potere" | Obbligatorio (no "puoi") | Non giocabile se nessun Alleato/Oggetto nel Reame |
+| "Sconfiggi un Eroe con Forza 4 o inferiore" | Obbligatorio | Non giocabile se nessun Eroe ≤4 Forza nel Reame |
+| "Puoi muovere un Alleato in un Luogo qualsiasi" | Facoltativo | Sempre giocabile; il movimento è opzionale |
+| "Puoi muovere un Eroe... Puoi muovere un Alleato..." | Facoltativo (entrambe) | Sempre giocabile; il giocatore può non fare niente |
+
+**Casi reali implementati in `canPlayCard` (gameEngine.js):**
+- `jaf_e_sac_*` Sacrificio Necessario → ≥1 Alleato o Oggetto nel Reame
+- `jaf_e_ser_*` Ah, Sarei un Serpente? → ≥1 Eroe Forza ≤4 nel Luogo corrente di Jafar
+- `jaf_e_ipn_*` Ipnotizzare → ≥1 Eroe nel Reame
+- `jaf_o_lam` Lampada Magica → Jafar deve essere nella Caverna delle Meraviglie
+- `hk_e_sig_*` Signorsì Signore! → ≥1 Alleato nel Reame
+- `urs_a_flo` / `urs_a_jet` Flotsam / Jetsam → ≥1 Eroe nel Reame
+- `urs_e_opp_*` Opportunista → ≥1 Oggetto o Effetto nella **pila degli scarti**
+- `urs_e_vor_*` Vortice → ≥1 Eroe nel Reame
+- `pj_e_imp_*` Imprigionare → ≥1 Eroe nel Reame
+- `pj_e_trap_*` Tendere una Trappola → ≥1 Eroe + ≥1 Alleato nel Reame (per lo Scontro obbligatorio)
+- `pj_e_int` Intimidire → ≥1 Eroe + ≥1 Alleato nel Reame
+- `qh_e_tes_*` Tagliategli la Testa! → ≥1 Eroe Forza ≤4 nel Reame
+- `qh_e_tir_*` Tirare → Archetto in ogni Luogo del Reame
+
+**Implementazione tecnica:** `canPlayCard(state, playerId, cardId)` in `gameEngine.js`
+restituisce `{ canPlay: true }` o `{ canPlay: false, reason: '...' }`.
+Ogni nuova carta con effetti obbligatori DEVE avere la sua logica aggiunta in questa funzione.
 
 ## Meccaniche critiche da tenere a mente
 - Le carte Condizione hanno un timing specifico — si attivano solo in determinati momenti del turno

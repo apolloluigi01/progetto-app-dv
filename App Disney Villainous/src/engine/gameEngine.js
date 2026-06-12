@@ -359,6 +359,183 @@ export function removePower(state, targetPlayerId, amount) {
   return newState
 }
 
+// ─── PLAYABILITY CHECK (REGOLA "PUOI") ──────────────────────
+/**
+ * Verifica se una carta può essere giocata dal giocatore.
+ *
+ * REGOLA FONDAMENTALE: se l'effetto di una carta contiene "puoi",
+ * l'azione è FACOLTATIVA — il giocatore può scegliere di non eseguirla.
+ * Se "puoi" è assente, l'azione è OBBLIGATORIA — se la pre-condizione
+ * non è soddisfatta, la carta NON PUÒ essere giocata.
+ *
+ * Ritorna { canPlay: true } oppure { canPlay: false, reason: '...' }.
+ * Utile anche all'UI per visualizzare le carte non giocabili (grigie).
+ */
+export function canPlayCard(state, playerId, cardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { canPlay: false, reason: 'Giocatore non trovato.' }
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+  const card = villain.villainDeck.find(c => c.id === cardId)
+  if (!card)                        return { canPlay: false, reason: 'Carta non trovata nel mazzo villain.' }
+  if (!player.hand.includes(cardId)) return { canPlay: false, reason: 'Carta non in mano.' }
+
+  // ── Verifica costo (con eventuale sconto Bastone per Malefica) ──
+  let bastonBonus = 0
+  if (player.villainId === 'maleficent' && (card.type === 'effect' || card.type === 'curse')) {
+    const curLoc = player.board.locations[player.currentLocation]
+    if (curLoc.items.includes('mal_o_bas')) bastonBonus = 1
+  }
+  const effectiveCost = Math.max(0, (card.cost || 0) - bastonBonus)
+  if (effectiveCost > player.power) {
+    return { canPlay: false, reason: `Potere insufficiente. Costo: ${effectiveCost}${bastonBonus ? ` (ridotto da ${card.cost} per il Bastone)` : ''}, disponibile: ${player.power}.` }
+  }
+
+  // ── Helper: cerca la definizione di una carta Fato in tutti i mazzi ──
+  function getHeroCard(heroId) {
+    for (const p of state.players) {
+      const v = VILLAINS[p.villainId]
+      const c = v?.fateDeck.find(fc => fc.id === heroId)
+      if (c) return c
+    }
+    return null
+  }
+
+  // ── Shorthand per le carte nel Reame ──
+  const allHeroesInRealm  = player.board.locations.flatMap(loc => loc.heroes)
+  const allAlliesInRealm  = player.board.locations.flatMap(loc => loc.allies)
+  const allItemsInRealm   = player.board.locations.flatMap(loc => loc.items)
+  const heroesInCurrentLoc = player.board.locations[player.currentLocation]?.heroes ?? []
+
+  // ────────────────────────────────────────────────────────────
+  // JAFAR
+  // ────────────────────────────────────────────────────────────
+
+  // Lampada Magica → solo nella Caverna delle Meraviglie
+  if (cardId === 'jaf_o_lam') {
+    const caveIdx = villain.locations.findIndex(l => l.id === 'caverna_meraviglie')
+    if (player.currentLocation !== caveIdx) {
+      return { canPlay: false, reason: 'La Lampada Magica può essere giocata solo nella Caverna delle Meraviglie.' }
+    }
+  }
+
+  // Sacrificio Necessario → almeno 1 Alleato o Oggetto nel Reame (obbligatorio: nessun "puoi")
+  if (cardId.startsWith('jaf_e_sac')) {
+    if (allAlliesInRealm.length === 0 && allItemsInRealm.length === 0) {
+      return { canPlay: false, reason: 'Sacrificio Necessario: devi avere almeno un Alleato o un Oggetto nel Reame da scartare.' }
+    }
+  }
+
+  // Ah, Sarei un Serpente? → Eroe con Forza ≤4 nel Luogo corrente di Jafar (obbligatorio)
+  if (cardId.startsWith('jaf_e_ser')) {
+    const heroCardsHere = heroesInCurrentLoc.map(getHeroCard).filter(Boolean)
+    if (!heroCardsHere.some(h => (h.strength || 0) <= 4)) {
+      return { canPlay: false, reason: 'Ah, Sarei un Serpente?: devi avere un Eroe con Forza 4 o inferiore nel tuo Luogo corrente.' }
+    }
+  }
+
+  // Ipnotizzare → almeno 1 Eroe nel Reame (obbligatorio)
+  if (cardId.startsWith('jaf_e_ipn')) {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Ipnotizzare: deve esserci almeno un Eroe nel Reame da ipnotizzare.' }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // CAPITAN UNCINO
+  // ────────────────────────────────────────────────────────────
+
+  // Signorsì Signore! → almeno 1 Alleato nel Reame (obbligatorio)
+  if (cardId.startsWith('hk_e_sig')) {
+    if (allAlliesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Signorsì Signore!: devi avere almeno un Alleato nel Reame da spostare.' }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // URSULA
+  // ────────────────────────────────────────────────────────────
+
+  // Flotsam / Jetsam → almeno 1 Eroe nel Reame quando viene giocato (obbligatorio)
+  if (cardId === 'urs_a_flo' || cardId === 'urs_a_jet') {
+    if (allHeroesInRealm.length === 0) {
+      const name = cardId === 'urs_a_flo' ? 'Flotsam' : 'Jetsam'
+      return { canPlay: false, reason: `${name}: deve esserci almeno un Eroe nel Reame da spostare.` }
+    }
+  }
+
+  // Opportunista → almeno 1 Oggetto o Effetto nella pila degli scarti (obbligatorio)
+  if (cardId.startsWith('urs_e_opp')) {
+    const hasDiscardable = player.villainDiscard.some(id => {
+      const c = villain.villainDeck.find(vc => vc.id === id)
+      return c && (c.type === 'item' || c.type === 'effect')
+    })
+    if (!hasDiscardable) {
+      return { canPlay: false, reason: 'Opportunista: devi avere almeno un Oggetto o Effetto nella pila degli scarti.' }
+    }
+  }
+
+  // Vortice → almeno 1 Eroe nel Reame (obbligatorio)
+  if (cardId.startsWith('urs_e_vor')) {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Vortice: deve esserci almeno un Eroe nel Reame da spostare.' }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PRINCIPE GIOVANNI
+  // ────────────────────────────────────────────────────────────
+
+  // Imprigionare → almeno 1 Eroe nel Reame (obbligatorio)
+  if (cardId.startsWith('pj_e_imp')) {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Imprigionare: deve esserci almeno un Eroe nel Reame da spostare.' }
+    }
+  }
+
+  // Tendere una Trappola → deve poter eseguire uno Scontro (Esegui = obbligatorio, senza "puoi")
+  if (cardId.startsWith('pj_e_trap')) {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Tendere una Trappola: deve esserci almeno un Eroe nel Reame per eseguire lo Scontro.' }
+    }
+    if (allAlliesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Tendere una Trappola: devi avere almeno un Alleato nel Reame per eseguire lo Scontro.' }
+    }
+  }
+
+  // Intimidire → deve poter eseguire uno Scontro (obbligatorio)
+  if (cardId === 'pj_e_int') {
+    if (allHeroesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Intimidire: deve esserci almeno un Eroe nel Reame per eseguire lo Scontro.' }
+    }
+    if (allAlliesInRealm.length === 0) {
+      return { canPlay: false, reason: 'Intimidire: devi avere almeno un Alleato nel Reame per eseguire lo Scontro.' }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // REGINA DI CUORI
+  // ────────────────────────────────────────────────────────────
+
+  // Tagliategli la Testa! → Eroe con Forza ≤4 nel Reame (obbligatorio)
+  if (cardId.startsWith('qh_e_tes')) {
+    const heroCards = allHeroesInRealm.map(getHeroCard).filter(Boolean)
+    if (!heroCards.some(h => (h.strength || 0) <= 4)) {
+      return { canPlay: false, reason: 'Tagliategli la Testa!: devi avere un Eroe con Forza 4 o inferiore nel Reame.' }
+    }
+  }
+
+  // Tirare → Archetto in ogni Luogo (condizione esplicita nell\'effetto, obbligatoria)
+  if (cardId.startsWith('qh_e_tir')) {
+    const hasAllWickets = player.board.locations.every(loc => loc.wickets.length > 0)
+    if (!hasAllWickets) {
+      return { canPlay: false, reason: 'Tirare: devi avere almeno un Archetto in ogni Luogo del Reame.' }
+    }
+  }
+
+  return { canPlay: true }
+}
+
 /**
  * Azione PLAY CARD (villain card): gioca una carta dalla mano.
  * Allies/Items → si posizionano nel luogo corrente (o targetLocation per curse/wicket).
@@ -374,7 +551,12 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   const card = villain.villainDeck.find(c => c.id === cardId)
   if (!card) return { error: 'Carta non trovata nel mazzo villain.' }
 
-  if (!player.hand.includes(cardId)) return { error: 'Carta non in mano.' }
+  // Verifica giocabilità: costo, carta in mano, effetti obbligatori (regola "puoi")
+  const playability = canPlayCard(state, playerId, cardId)
+  if (!playability.canPlay) return { error: playability.reason }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
 
   // Bastone (Malefica): riduce costo di Effetti e Maledizioni di 1 se presente nel luogo corrente
   let bastonBonus = 0
@@ -384,15 +566,7 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   }
   const effectiveCost = Math.max(0, (card.cost || 0) - bastonBonus)
 
-  // Verifica costo
-  if (effectiveCost > player.power) {
-    return { error: `Potere insufficiente. Costo: ${effectiveCost}${bastonBonus ? ` (ridotto da ${card.cost} per il Bastone)` : ''}, disponibile: ${player.power}.` }
-  }
-
-  const newPlayers = deepClone(state.players)
-  const np = newPlayers[pidx]
-
-  // Paga il costo (effettivo, con eventuale sconto Bastone)
+  // Paga il costo (già verificato in canPlayCard)
   np.power -= effectiveCost
 
   // Rimuovi dalla mano
@@ -1661,6 +1835,7 @@ export default {
   completeAction,
   gainPower,
   removePower,
+  canPlayCard,
   playVillainCard,
   playVillainCardToLocation,
   drawCards,
