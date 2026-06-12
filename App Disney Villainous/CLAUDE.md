@@ -28,6 +28,7 @@ supabase/
 ## Ultimo aggiornamento dati carte
 2026-06-12 — aggiornati costi, forze, nomi ed effetti di tutte le carte dei 6 villain base in `src/data/villains.js` per allineamento al testo ufficiale Ravensburger.
 2026-06-12 — implementata regola "puoi" in `gameEngine.js` (`canPlayCard`): effetti obbligatori bloccano la giocata se le pre-condizioni non sono soddisfatte.
+2026-06-12 — 4 fix generali: Assegna a un Eroe obbligatorio (engine + UI), pile scarti visibili, log collassabile, meccanica Attiva corretta ([Attiva]).
 
 ## Villain implementati (tutti in versione bozza — da migliorare)
 - [ ] Capitan Uncino
@@ -63,10 +64,14 @@ supabase/
 - [x] Struttura realm/location per ogni villain
 - [x] Multiplayer Realtime via Supabase
 - [x] Deploy Vercel funzionante
-- [ ] Meccanica carte Condizione — da implementare correttamente
-- [ ] Azione Attivare — da migliorare
+- [x] Regola "puoi" — effetti obbligatori bloccati se pre-condizione non soddisfatta
+- [x] Pile degli scarti — sempre visibili e consultabili da entrambi i giocatori
+- [x] Log di gioco — collassabile tramite pulsante in header (parte nascosto)
+- [x] Azione Attivare — keyword `[Attiva]`, pannello selezione carta, errore se nessuna
+- [x] Oggetti "Assegna a un Eroe" — obbligatori se l'effetto lo specifica (engine + UI)
+- [ ] Meccanica carte Condizione — da migliorare (parzialmente implementata)
 - [ ] Carte tipo speciale per villain (es. Maledizioni Malefica, Titani Ade)
-- [ ] Fix meccaniche specifiche carte singole
+- [ ] Fix meccaniche specifiche carte singole (da fare villain per villain)
 - [ ] Grafica e UI — da rifare completamente (priorità bassa, ultima fase)
 
 ## Priorità di sviluppo
@@ -121,15 +126,15 @@ Ogni nuova carta con effetti obbligatori DEVE avere la sua logica aggiunta in qu
 
 ## Meccaniche critiche da tenere a mente
 - Le carte Condizione hanno un timing specifico — si attivano solo in determinati momenti del turno
-- L'azione Attivare è villain-specific e va trattata caso per caso
+- Oggetti con "Assegna a un Eroe" nell'effetto = obbligatorio assegnare; engine blocca se nessun Eroe presente
+- Keyword `[Attiva]` nell'effetto = carta ha abilità attivabile (NON "Attivazione")
 - Le carte speciali per villain (Maledizioni, Titani, ecc.) richiedono tipi dedicati nel engine
 - Le carte Fate hanno un flusso separato rispetto alle carte villain
 
 ## Known issues attivi
-- Azione Attivare non funziona correttamente
-- Carte Condizione non gestite correttamente
+- Carte Condizione non gestite correttamente in tutti i casi edge
 - Meccaniche carte speciali per villain non ancora implementate
-- Varie fix su carte singole da scoprire durante il testing
+- Varie fix su carte singole da scoprire durante il testing villain per villain
 
 ## Procedura post-modifica (OBBLIGATORIA dopo ogni sessione di lavoro)
 
