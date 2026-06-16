@@ -65,6 +65,8 @@ export default function Game() {
     conditionFateOneCard, conditionSkipEffect,
     requestUndo, respondUndo,
     completeAction, endTurn,
+    resolveFilippoDiscard, resolveReStefanoMove, resolveReUbertoMove,
+    resolveOnceuponatime, resolveFormadiDrago,
   } = useGame(roomCode)
 
   const [corvoUsed,    setCorvoUsed]    = useState(false)
@@ -292,8 +294,15 @@ export default function Game() {
 
   // ── Conferma gioca effetto ────────────────────────────────
   async function handleConfirmPlayEffect() {
-    const res = await exec(playCard, modeData.cardId)
+    const cardId = modeData.cardId
+    const res = await exec(playCard, cardId)
     if (!res?.error) {
+      // Forma di Drago: richiede selezione eroe da sconfiggere
+      if (cardId && cardId.startsWith('mal_e_dra')) {
+        setMode('forma_drago_defeat')
+        setModeData(prev => ({ ...prev }))
+        return
+      }
       if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
       else await exec(completeAction, modeData.actionIndex)
       resetMode()
@@ -321,7 +330,7 @@ export default function Game() {
       return
     }
     if (isMyTurn && phase === 'move') {
-      if (idx !== myPlayer.currentLocation) setStagedLocation(idx)
+      if (idx !== myPlayer.currentLocation || myPlayer?.svanireActive) setStagedLocation(idx)
       return
     }
     if (mode === 'play_ally_location') {
@@ -520,15 +529,76 @@ export default function Game() {
     if (!pi || pi.type !== 'place_fate_card') return
     const res = await exec(placeFateCard, pi.cardId, pi.targetPlayerId, locationIndex)
     if (!res?.error) {
-      // Se è un fate_item con eroi nello stesso luogo → proponi assegnazione
       const targetP = gameState.players.find(p => p.id === pi.targetPlayerId)
       const card    = VILLAINS[targetP?.villainId]?.fateDeck.find(c => c.id === pi.cardId)
+
       if (card?.type === 'fate_item') {
         const locHeroes = targetP?.board.locations[locationIndex]?.heroes || []
         const isMandatory = card.effect?.includes('Assegna a un Eroe')
         if (isMandatory || locHeroes.length > 0) {
           setMode('assign_fate_item')
           setModeData({ itemCardId: pi.cardId, itemName: card.name, targetPlayerId: pi.targetPlayerId, locationIndex, isMandatory })
+          return
+        }
+      }
+
+      // Principe Filippo — chiedi se scartare alleati nel luogo
+      if (pi.cardId === 'fmal_filippo' && targetP?.villainId === 'maleficent') {
+        const loc = targetP?.board.locations[locationIndex]
+        if (loc && loc.allies.length > 0) {
+          setMode('filippo_discard_choice')
+          setModeData({ filippoData: { targetPlayerId: pi.targetPlayerId, locationIndex, allyCount: loc.allies.length } })
+          return
+        }
+      }
+
+      // Re Stefano — chiedi dove spostare Malefica
+      if (pi.cardId === 'fmal_stefano' && targetP?.villainId === 'maleficent') {
+        setMode('re_stefano_move')
+        setModeData({ stefanoData: { targetPlayerId: pi.targetPlayerId } })
+        return
+      }
+
+      // Re Uberto — chiedi quale alleato spostare
+      if (pi.cardId === 'fmal_uberto' && targetP?.villainId === 'maleficent') {
+        const adjacentIndices = [locationIndex - 1, locationIndex + 1].filter(
+          i => i >= 0 && i < (targetP?.board.locations.length || 0)
+        )
+        const mVillain = VILLAINS['maleficent']
+        const alliesInAdj = adjacentIndices.flatMap(adjIdx =>
+          (targetP?.board.locations[adjIdx]?.allies || []).map(allyId => ({
+            allyId,
+            fromLocIdx: adjIdx,
+            allyName: mVillain?.villainDeck.find(c => c.id === allyId)?.name || allyId,
+          }))
+        )
+        if (alliesInAdj.length > 0) {
+          setMode('re_uberto_move')
+          setModeData({ ubertoData: { targetPlayerId: pi.targetPlayerId, toLocIdx: locationIndex, allies: alliesInAdj } })
+          return
+        }
+      }
+
+      // C'era una Volta in un Sogno — se più bersagli, chiedi quale
+      if ((pi.cardId === 'fmal_sogno_1' || pi.cardId === 'fmal_sogno_2') && targetP?.villainId === 'maleficent') {
+        const mVillain = VILLAINS['maleficent']
+        const validCurses = (targetP?.board.locations || []).reduce((acc, loc, idx) => {
+          if (loc.curses.length > 0 && loc.heroes.length > 0) {
+            loc.curses.forEach(cId => {
+              acc.push({
+                curseId: cId,
+                curseName: mVillain?.villainDeck.find(c => c.id === cId)?.name || cId,
+                locIdx: idx,
+                locName: mVillain?.locations[idx]?.name || `Luogo ${idx + 1}`,
+              })
+            })
+          }
+          return acc
+        }, [])
+        if (validCurses.length > 1) {
+          setMode('sogno_choose_curse')
+          setModeData({ sognoData: { targetPlayerId: pi.targetPlayerId, validCurses } })
+          return
         }
       }
     }
@@ -780,10 +850,25 @@ export default function Game() {
                 : isAuroraTarget ? handleAuroraPlaceHero
                 : undefined
               return (
-                <PlayerBoard key={opp.id} player={opp} isMyBoard={false} isMyTurn={false}
-                  phase={phase} actionQueue={[]} stagedLocation={null} selectedCardId={null}
-                  onLocationClick={oppClickHandler}
-                />
+                <div key={opp.id} className="flex flex-col gap-2">
+                  <PlayerBoard player={opp} isMyBoard={false} isMyTurn={false}
+                    phase={phase} actionQueue={[]} stagedLocation={null} selectedCardId={null}
+                    onLocationClick={oppClickHandler}
+                  />
+                  {/* Flora: mostra mano di Malefica agli avversari */}
+                  {opp.floraActive && opp.villainId === 'maleficent' && (
+                    <div className="bg-emerald-950/40 border border-emerald-700/50 rounded-xl px-4 py-3 flex flex-col gap-2">
+                      <p className="text-[10px] font-display text-emerald-500 uppercase tracking-wider">🌿 Flora — Mano di {opp.name} (carte scoperte)</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {opp.hand.map(cardId => {
+                          const card = VILLAINS['maleficent']?.villainDeck.find(c => c.id === cardId)
+                          return card ? <Card key={cardId} card={card} small showEffect={false} /> : null
+                        })}
+                        {opp.hand.length === 0 && <p className="text-xs text-gray-600 italic">Mano vuota.</p>}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )
             })}
           </section>
@@ -802,7 +887,9 @@ export default function Game() {
               {/* Pannello conferma movimento villain */}
               {isMyTurn && phase === 'move' && stagedLocation !== null && (
                 <ConfirmPanel
-                  message={`Sposta il villain in: "${myVillain?.locations[stagedLocation]?.name}"?`}
+                  message={stagedLocation === myPlayer?.currentLocation
+                    ? `Rimani in: "${myVillain?.locations[stagedLocation]?.name}"? (Svanire)`
+                    : `Sposta il villain in: "${myVillain?.locations[stagedLocation]?.name}"?`}
                   sub="Puoi ancora cambiare cliccando un altro luogo."
                   onConfirm={handleConfirmMove}
                   onCancel={() => setStagedLocation(null)}
@@ -863,7 +950,7 @@ export default function Game() {
                     🦅 <strong>Il Corvo è presente nel Reame.</strong> Puoi muoverlo prima di spostarti.
                   </p>
                   <button
-                    onClick={() => { setMode('corvo_dest_pick'); setUiMsg('Clicca il luogo di destinazione per il Corvo (adiacente a quello attuale).') }}
+                    onClick={() => { setMode('corvo_dest_pick'); setUiMsg('Clicca il luogo di destinazione per il Corvo (qualsiasi luogo del Reame).') }}
                     className="btn-secondary text-xs px-4 shrink-0"
                   >🦅 Muovi Corvo</button>
                 </div>
@@ -873,7 +960,7 @@ export default function Game() {
               {isMyTurn && mode === 'corvo_dest_pick' && (
                 <div className="bg-gray-800/60 border border-gray-600 rounded-xl p-3 flex items-center justify-between gap-3">
                   <p className="text-sm text-gray-300">
-                    🦅 Clicca un luogo di destinazione per il Corvo (luogo adiacente a quello attuale).
+                    🦅 Clicca un luogo di destinazione per il Corvo (qualsiasi luogo del Reame).
                   </p>
                   <button onClick={() => { setMode(null); setUiMsg(null) }} className="btn-secondary text-xs px-3">Annulla</button>
                 </div>
@@ -912,6 +999,39 @@ export default function Game() {
                   </div>
                 )
               })()}
+
+              {/* ── Banner Svanire (promemoria visibile) ── */}
+              {myPlayer?.villainId === 'maleficent' && myPlayer?.svanireActive && phase === 'move' && (
+                <div className="bg-indigo-950/60 border border-indigo-600/70 rounded-xl p-3 flex items-center gap-3">
+                  <span className="text-2xl">✨</span>
+                  <div>
+                    <p className="text-indigo-200 font-display font-bold text-sm">Svanire attivo</p>
+                    <p className="text-indigo-400 text-xs">Puoi restare nel luogo attuale o spostarti in un nuovo luogo.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Banner Forma di Drago (promemoria visibile) ── */}
+              {myPlayer?.villainId === 'maleficent' && myPlayer?.dragonFormActive && (
+                <div className="bg-orange-950/60 border border-orange-600/70 rounded-xl p-3 flex items-center gap-3">
+                  <span className="text-2xl">🐉</span>
+                  <div>
+                    <p className="text-orange-200 font-display font-bold text-sm">Forma di Drago attiva</p>
+                    <p className="text-orange-400 text-xs">Se vieni colpita da un Fato, guadagni 3 Potere. Dura fino alla fine del tuo prossimo turno.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Banner Flora (Malefica gioca a carte scoperte) ── */}
+              {myPlayer?.villainId === 'maleficent' && myPlayer?.floraActive && (
+                <div className="bg-emerald-950/60 border border-emerald-600/70 rounded-xl p-3 flex items-center gap-3">
+                  <span className="text-2xl">🌿</span>
+                  <div>
+                    <p className="text-emerald-200 font-display font-bold text-sm">Flora in campo — Carte Scoperte</p>
+                    <p className="text-emerald-400 text-xs">La tua mano è visibile agli avversari finché Flora non viene sconfitta.</p>
+                  </div>
+                </div>
+              )}
 
               {/* Pannello Aurora: posiziona eroe rivelato */}
               {mode === 'aurora_place_hero' && gameState.pendingFateReveal?.actorPlayerId === myPlayerId && (() => {
@@ -1126,6 +1246,134 @@ export default function Game() {
                     confirmLabel="✓ Assegna"
                   />
                 )}
+              </div>
+            </section>
+          )}
+
+          {/* ── Malefica: Principe Filippo — scelta scarto alleati ── */}
+          {isMyTurn && mode === 'filippo_discard_choice' && modeData.filippoData && (
+            <section className="p-4 shrink-0">
+              <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4 flex flex-col gap-3">
+                <h3 className="font-display text-red-300 font-bold text-sm">⚔️ Principe Filippo</h3>
+                <p className="text-sm text-gray-300">
+                  Ci sono <strong>{modeData.filippoData.allyCount}</strong> Alleato/i in questo luogo. Vuoi scartarli?
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    await exec(resolveFilippoDiscard, modeData.filippoData.targetPlayerId, modeData.filippoData.locationIndex, false)
+                    resetMode()
+                  }} className="btn-secondary text-xs px-4">✗ No, lascia</button>
+                  <button onClick={async () => {
+                    await exec(resolveFilippoDiscard, modeData.filippoData.targetPlayerId, modeData.filippoData.locationIndex, true)
+                    resetMode()
+                  }} className="btn-primary text-xs px-4">✓ Sì, scarta</button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Malefica: Re Stefano — seleziona destinazione per Malefica ── */}
+          {isMyTurn && mode === 're_stefano_move' && modeData.stefanoData && (
+            <section className="p-4 shrink-0">
+              <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4 flex flex-col gap-3">
+                <h3 className="font-display text-rose-300 font-bold text-sm">👑 Re Stefano — Sposta Malefica</h3>
+                <p className="text-xs text-rose-400">
+                  Scegli il luogo in cui spostare Malefica. Se il luogo ha Fuoco Verde, viene scartato.
+                </p>
+                <div className="flex gap-2 flex-wrap">
+                  {(() => {
+                    const targetP = gameState.players.find(p => p.id === modeData.stefanoData.targetPlayerId)
+                    const tVillain = VILLAINS[targetP?.villainId]
+                    return (tVillain?.locations || []).map((loc, idx) => (
+                      <button key={idx} onClick={async () => {
+                        await exec(resolveReStefanoMove, modeData.stefanoData.targetPlayerId, idx)
+                        resetMode()
+                      }} className="btn-secondary text-xs px-3">
+                        📍 {loc.name}
+                      </button>
+                    ))
+                  })()}
+                  <button onClick={resetMode} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">Salta</button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Malefica: Re Uberto — seleziona alleato da spostare ── */}
+          {isMyTurn && mode === 're_uberto_move' && modeData.ubertoData && (
+            <section className="p-4 shrink-0">
+              <div className="bg-pink-950/40 border border-pink-700/50 rounded-xl p-4 flex flex-col gap-3">
+                <h3 className="font-display text-pink-300 font-bold text-sm">🤺 Re Uberto — Sposta Alleato</h3>
+                <p className="text-xs text-pink-400">
+                  Scegli un Alleato da spostare nel luogo di Re Uberto.
+                </p>
+                <div className="flex gap-2 flex-wrap">
+                  {modeData.ubertoData.allies.map(({ allyId, fromLocIdx, allyName }) => (
+                    <button key={allyId} onClick={async () => {
+                      await exec(resolveReUbertoMove, modeData.ubertoData.targetPlayerId, allyId, fromLocIdx, modeData.ubertoData.toLocIdx)
+                      resetMode()
+                    }} className="btn-secondary text-xs px-3">
+                      ⚔️ {allyName}
+                    </button>
+                  ))}
+                  <button onClick={resetMode} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">Salta</button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Malefica: C'era una Volta in un Sogno — seleziona maledizione ── */}
+          {isMyTurn && mode === 'sogno_choose_curse' && modeData.sognoData && (
+            <section className="p-4 shrink-0">
+              <div className="bg-violet-950/40 border border-violet-700/50 rounded-xl p-4 flex flex-col gap-3">
+                <h3 className="font-display text-violet-300 font-bold text-sm">🌙 C'era una Volta in un Sogno</h3>
+                <p className="text-xs text-violet-400">Scegli quale Maledizione scartare:</p>
+                <div className="flex gap-2 flex-wrap">
+                  {modeData.sognoData.validCurses.map(({ curseId, curseName, locIdx, locName }) => (
+                    <button key={curseId + locIdx} onClick={async () => {
+                      await exec(resolveOnceuponatime, modeData.sognoData.targetPlayerId, curseId, locIdx)
+                      resetMode()
+                    }} className="btn-secondary text-xs px-3">
+                      ✨ {curseName} @ {locName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* ── Malefica: Forma di Drago — seleziona eroe da sconfiggere ── */}
+          {isMyTurn && mode === 'forma_drago_defeat' && (
+            <section className="p-4 shrink-0">
+              <div className="bg-orange-950/40 border border-orange-700/50 rounded-xl p-4 flex flex-col gap-3">
+                <h3 className="font-display text-orange-300 font-bold text-sm">🐉 Forma di Drago — Sconfiggi Eroe</h3>
+                <p className="text-xs text-orange-400">Scegli un Eroe con Forza effettiva ≤3 da sconfiggere:</p>
+                <div className="flex gap-2 flex-wrap">
+                  {myPlayer && (() => {
+                    const targets = myPlayer.board.locations.flatMap((loc, li) => {
+                      const hasSonno = loc.curses.some(id => id.startsWith('mal_c_son'))
+                      return loc.heroes.map(hId => {
+                        const hCard = findCardFromAll(gameState, hId)
+                        const forzaBase = hCard?.strength || 0
+                        const forzaEff = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+                        return forzaEff <= 3 ? { id: hId, name: hCard?.name || hId, forzaEff, locName: myVillain?.locations[li]?.name } : null
+                      }).filter(Boolean)
+                    })
+                    if (targets.length === 0) return <p className="text-xs text-orange-500 italic">Nessun bersaglio valido.</p>
+                    return targets.map(t => (
+                      <button key={t.id} onClick={async () => {
+                        const res = await exec(resolveFormadiDrago, t.id)
+                        if (!res?.error) {
+                          await exec(completeAction, modeData.actionIndex)
+                          resetMode()
+                        }
+                      }} className="btn-secondary text-xs px-3">
+                        🐉 {t.name} (F:{t.forzaEff}) — {t.locName}
+                      </button>
+                    ))
+                  })()}
+                  <button onClick={async () => { await exec(completeAction, modeData.actionIndex); resetMode() }} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">Salta</button>
+                </div>
               </div>
             </section>
           )}

@@ -542,6 +542,30 @@ export function canPlayCard(state, playerId, cardId) {
     }
   }
 
+  // ────────────────────────────────────────────────────────────
+  // MALEFICA: Forma di Drago → almeno un Eroe con forza effettiva ≤3 nel Reame
+  // ────────────────────────────────────────────────────────────
+  if (cardId.startsWith('mal_e_dra')) {
+    const hasValidTarget = player.board.locations.some((loc) => {
+      const hasSonno = loc.curses.some(id => id.startsWith('mal_c_son'))
+      return loc.heroes.some(heroId => {
+        for (const p of state.players) {
+          const v = VILLAINS[p.villainId]
+          const heroCard = v?.fateDeck.find(c => c.id === heroId)
+          if (heroCard) {
+            const forzaBase = heroCard.strength || 0
+            const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+            return forzaAttuale <= 3
+          }
+        }
+        return false
+      })
+    })
+    if (!hasValidTarget) {
+      return { canPlay: false, reason: 'Forma di Drago: non ci sono Eroi con Forza ≤3 (effettiva) nel Reame da sconfiggere.' }
+    }
+  }
+
   return { canPlay: true }
 }
 
@@ -575,8 +599,24 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   }
   const effectiveCost = Math.max(0, (card.cost || 0) - bastonBonus)
 
-  // Paga il costo (già verificato in canPlayCard)
-  np.power -= effectiveCost
+  // Spada della Verità: se nel luogo di destinazione c'è una Spada e almeno un Eroe, costo +2
+  let spadaBonus = 0
+  if (card.type === 'curse' && player.villainId === 'maleficent') {
+    // targetLocIdx non è ancora definito qui, usiamo il luogo calcolato provvisoriamente
+    const tentativeLocIdx = overrideLocationIndex ?? np.currentLocation
+    const tentativeLoc = np.board.locations[tentativeLocIdx]
+    if (tentativeLoc) {
+      const hasSpadaWithHero = tentativeLoc.items.some(id => id.startsWith('fmal_spada')) &&
+        tentativeLoc.heroes.length > 0
+      if (hasSpadaWithHero) spadaBonus = 2
+    }
+  }
+  const finalCost = Math.max(0, effectiveCost + spadaBonus)
+  if (finalCost > player.power) {
+    return { error: `Potere insufficiente. Costo maledizione con Spada della Verità: ${finalCost} (base: ${card.cost}, Bastone: -${bastonBonus}, Spada: +2). Disponibile: ${player.power}.` }
+  }
+  // Paga il costo (già verificato in canPlayCard, integrato con Spada)
+  np.power -= finalCost
 
   // Rimuovi dalla mano
   np.hand = np.hand.filter(id => id !== cardId)
@@ -607,9 +647,15 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
     case 'item':
       loc.items.push(cardId)
       break
-    case 'curse':
+    case 'curse': {
+      // Serena impedisce di giocare Maledizioni nel suo luogo
+      const hasSerena = loc.heroes.some(id => id === 'fmal_serena')
+      if (hasSerena) {
+        return { error: 'Serena è in questo luogo: non è possibile giocare Maledizioni qui.' }
+      }
       loc.curses.push(cardId)
       break
+    }
     case 'wicket':
       loc.wickets.push(cardId)
       break
@@ -900,7 +946,7 @@ export function moveAllyOrItem(state, playerId, cardId, fromLocationIndex, toLoc
 
 /**
  * Muove il Corvo (mal_a_cor) durante la fase 'move', prima che Malefica si sposti.
- * Trova automaticamente il luogo corrente del Corvo e lo sposta al luogo adiacente indicato.
+ * Il Corvo può muoversi in QUALSIASI luogo del Reame (non solo adiacente).
  */
 export function moveCorvoAlly(state, playerId, toLocIdx) {
   const pidx = getPlayerIndex(state, playerId)
@@ -908,14 +954,32 @@ export function moveCorvoAlly(state, playerId, toLocIdx) {
   const player = state.players[pidx]
   if (player.villainId !== 'maleficent') return { error: 'Solo Malefica può muovere il Corvo.' }
   if (state.phase !== 'move') return { error: 'Il Corvo può muoversi solo prima che Malefica si sposti.' }
+  if (toLocIdx < 0 || toLocIdx >= player.board.locations.length) return { error: 'Luogo di destinazione non valido.' }
 
   let fromLocIdx = -1
   for (let i = 0; i < player.board.locations.length; i++) {
     if (player.board.locations[i].allies.includes('mal_a_cor')) { fromLocIdx = i; break }
   }
   if (fromLocIdx < 0) return { error: 'Il Corvo non è presente nel Reame.' }
+  if (fromLocIdx === toLocIdx) return { error: 'Scegli un luogo diverso da quello attuale del Corvo.' }
 
-  return moveAllyOrItem(state, playerId, 'mal_a_cor', fromLocIdx, toLocIdx)
+  const villain = VILLAINS[player.villainId]
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const from = np.board.locations[fromLocIdx]
+  const to   = np.board.locations[toLocIdx]
+
+  const idx = from.allies.indexOf('mal_a_cor')
+  if (idx < 0) return { error: 'Il Corvo non trovato nel luogo di partenza.' }
+  from.allies.splice(idx, 1)
+  to.allies.push('mal_a_cor')
+
+  const fromName = villain.locations[fromLocIdx].name
+  const toName   = villain.locations[toLocIdx].name
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${np.name} sposta il Corvo da "${fromName}" a "${toName}".`, 'action')
+  return newState
 }
 
 // ─── AZIONE VANQUISH ─────────────────────────────────────────
@@ -974,9 +1038,30 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     }
   }
 
+  // Guardie (Malefica): richiedono almeno 2 Alleati per lo Scontro
+  if (heroCard?.name === 'Guardie' && player.villainId === 'maleficent') {
+    if (allyCardIds.length < 2) {
+      return { error: 'Le Guardie richiedono almeno 2 Alleati per essere sconfitte con lo Scontro.' }
+    }
+  }
+
   const newPlayers = deepClone(state.players)
   const np = newPlayers[pidx]
   const nloc = np.board.locations[heroLocIdx]
+
+  // ── Malefica: Arcolaio → guadagna Potere = forza attuale dell'Eroe sconfitto - 1
+  // (calcolato PRIMA della rimozione dell'eroe, per leggere le maledizioni nel luogo)
+  if (player.villainId === 'maleficent') {
+    const arcolaioPresente = nloc.items.includes('mal_o_arc')
+    if (arcolaioPresente) {
+      // Forza attuale = base - 2 se c'è Sonno Senza Sogni nel luogo
+      const hasSonno = nloc.curses.some(id => id.startsWith('mal_c_son'))
+      const forzaBase = heroCard?.strength || 0
+      const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+      const potereGuadagnato = Math.max(0, forzaAttuale - 1)
+      np.power += potereGuadagnato
+    }
+  }
 
   // Rimuovi l'Eroe dal luogo in cui si trovava
   nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
@@ -992,6 +1077,25 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     `${player.name} sconfigge "${heroCard?.name || heroCardId}" in "${locName}" (forza alleati: ${totalAllyStrength} vs ${heroStrength}).`,
     'action'
   )
+
+  // Log Arcolaio (dopo la modifica dello state)
+  if (player.villainId === 'maleficent') {
+    const arcolaioPresente = player.board.locations[heroLocIdx].items.includes('mal_o_arc')
+    if (arcolaioPresente) {
+      const hasSonno = player.board.locations[heroLocIdx].curses.some(id => id.startsWith('mal_c_son'))
+      const forzaBase = heroCard?.strength || 0
+      const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+      const potereGuadagnato = Math.max(0, forzaAttuale - 1)
+      newState = addLog(newState, `Arcolaio: "${heroCard?.name}" sconfitto con forza attuale ${forzaAttuale} → guadagni ${potereGuadagnato} Potere (tot: ${newPlayers[pidx].power}).`, 'action')
+    }
+  }
+
+  // Flora sconfitta → reset carte scoperte
+  if (heroCardId === 'fmal_flora' && player.villainId === 'maleficent') {
+    newPlayers[pidx].floraActive = false
+    newState = { ...newState, players: newPlayers }
+    newState = addLog(newState, `Flora sconfitta: Malefica torna a giocare a carte coperte.`, 'action')
+  }
 
   // Caso speciale: Peter Pan sconfitto sulla Jolly Roger (index 0)
   if (heroCardId === 'fhk_peter' && heroLocIdx === 0) {
@@ -1211,24 +1315,17 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
     fateLogs.push(`Re Stefano: scegli un luogo dove spostare Malefica. Se ha Fuoco Verde, quella Maledizione verrà scartata.`)
   }
 
-  // ── Malefica: Principe Filippo → scarta tutti gli Alleati nei luoghi adiacenti
+  // ── Malefica: Principe Filippo → può scartare tutti gli Alleati nel suo luogo di arrivo
   if (cardId === 'fmal_filippo' && target.villainId === 'maleficent') {
-    const adjacentIndices = [locationIndex - 1, locationIndex + 1].filter(
-      i => i >= 0 && i < target.board.locations.length
-    )
-    for (const adjIdx of adjacentIndices) {
-      const adjLoc = target.board.locations[adjIdx]
-      const adjName = villain?.locations[adjIdx]?.name || '?'
-      if (adjLoc.allies.length > 0) {
-        const discarded = [...adjLoc.allies]
-        adjLoc.allies = []
-        target.villainDiscard.push(...discarded)
-        fateLogs.push(`Principe Filippo scarta ${discarded.length} Alleato/i da "${adjName}" (incluso il Corvo se presente)!`)
-      }
+    const filippoLoc = target.board.locations[locationIndex]
+    if (filippoLoc.allies.length > 0) {
+      // "può" → pending interaction per chiedere conferma
+      // La rimozione effettiva avviene in resolveFilippoDiscard
+      fateLogs.push(`Principe Filippo: ci sono ${filippoLoc.allies.length} Alleato/i in questo luogo. Scegli se scartarli.`)
     }
   }
 
-  // ── Malefica: Fauna → scarta un Sonno Senza Sogni nel luogo in cui viene giocata
+  // ── Malefica: Fauna → scarta un Sonno Senza Sogni nel luogo in cui viene giocata (obbligatorio)
   if (cardId === 'fmal_fauna' && target.villainId === 'maleficent') {
     const faunaLoc = target.board.locations[locationIndex]
     const sonnoIdx = faunaLoc.curses.findIndex(id => id.startsWith('mal_c_son'))
@@ -1236,6 +1333,8 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
       const discarded = faunaLoc.curses.splice(sonnoIdx, 1)[0]
       target.fateDiscard.push(discarded)
       fateLogs.push(`Fauna scarta il Sonno Senza Sogni in "${locName}"!`)
+    } else {
+      fateLogs.push(`Fauna: nessun Sonno Senza Sogni in "${locName}".`)
     }
   }
 
@@ -1263,6 +1362,52 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
       }
     } else {
       fateLogs.push(`Aurora: il mazzo Fato di Malefica è esaurito, nessuna carta da rivelare.`)
+    }
+  }
+
+  // ── Malefica: Flora → Malefica gioca a carte scoperte finché Flora è in campo
+  if (cardId === 'fmal_flora' && target.villainId === 'maleficent') {
+    target.floraActive = true
+    fateLogs.push(`Flora: Malefica gioca a carte scoperte finché Flora non viene sconfitta!`)
+  }
+
+  // ── Malefica: Re Uberto → puoi spostare un Alleato da un luogo adiacente nel suo luogo
+  if (cardId === 'fmal_uberto' && target.villainId === 'maleficent') {
+    const adjacentIndices = [locationIndex - 1, locationIndex + 1].filter(
+      i => i >= 0 && i < target.board.locations.length
+    )
+    const alliesInAdjacentLocs = adjacentIndices.flatMap(adjIdx =>
+      target.board.locations[adjIdx].allies.map(allyId => ({ allyId, fromLocIdx: adjIdx }))
+    )
+    if (alliesInAdjacentLocs.length > 0) {
+      fateLogs.push(`Re Uberto: puoi spostare un Alleato da un luogo adiacente in "${locName}". Scegli quale.`)
+    } else {
+      fateLogs.push(`Re Uberto: nessun Alleato nei luoghi adiacenti da spostare.`)
+    }
+  }
+
+  // ── Malefica: C'era una Volta in un Sogno → scarta una Maledizione da luogo con Eroe
+  if ((cardId === 'fmal_sogno_1' || cardId === 'fmal_sogno_2') && target.villainId === 'maleficent') {
+    // Trova tutti i luoghi con almeno una maledizione E almeno un eroe
+    const validLocs = target.board.locations.reduce((acc, loc, idx) => {
+      if (loc.curses.length > 0 && loc.heroes.length > 0) {
+        loc.curses.forEach(cId => acc.push({ curseId: cId, locIdx: idx }))
+      }
+      return acc
+    }, [])
+    if (validLocs.length === 0) {
+      fateLogs.push(`C'era una Volta in un Sogno: carta non utilizzabile — nessuna Maledizione in luoghi con Eroi.`)
+    } else if (validLocs.length === 1) {
+      // Solo un bersaglio: scarta automaticamente
+      const { curseId, locIdx } = validLocs[0]
+      const loc2 = target.board.locations[locIdx]
+      loc2.curses = loc2.curses.filter(id => id !== curseId)
+      target.fateDiscard.push(curseId)
+      const malCard = villain?.villainDeck.find(c => c.id === curseId)
+      fateLogs.push(`C'era una Volta in un Sogno: "${malCard?.name || curseId}" scartata da "${villain?.locations[locIdx]?.name || locIdx}"!`)
+    } else {
+      // Più bersagli: il giocatore deve scegliere
+      fateLogs.push(`C'era una Volta in un Sogno: scegli quale Maledizione scartare (più luoghi con Eroi e Maledizioni presenti).`)
     }
   }
 
@@ -1405,8 +1550,8 @@ export function respondConditionActivation(state, responderId, approved) {
     if (np.villainDeck.length === 0) { np.villainDeck = shuffle([...np.villainDiscard]); np.villainDiscard = [] }
     const drawn = np.villainDeck.splice(0, Math.min(3, np.villainDeck.length))
     np.hand = [...np.hand, ...drawn]
-    condEffect = { type: 'discard_n_cards', playerId: pending.playerId, count: 3, discarded: 0 }
-    newState = addLog(newState, `Tirannia: ${np.name} pesca ${drawn.length} carte. Deve scartarne 3.`, 'condition')
+    condEffect = { type: 'discard_n_cards', playerId: pending.playerId, count: 2, discarded: 0 }
+    newState = addLog(newState, `Tirannia: ${np.name} pesca ${drawn.length} carte. Deve scartarne 2.`, 'condition')
   } else if (cid.startsWith('mal_k_mal')) {
     condEffect = { type: 'defeat_hero_le4', playerId: pending.playerId }
     newState = addLog(newState, `Malignità: ${np.name} può sconfiggere un Eroe con Forza ≤4 nel suo Reame.`, 'condition')
@@ -1515,6 +1660,10 @@ export function conditionDefeatHero(state, playerId, heroCardId) {
   np.board.locations[heroLocIdx].heroes = np.board.locations[heroLocIdx].heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
   updateCoveredActions(np, heroLocIdx, villain)
+  // Flora sconfitta tramite Malignità → reset carte scoperte
+  if (heroCardId === 'fmal_flora' && np.villainId === 'maleficent') {
+    np.floraActive = false
+  }
   let newState = { ...state, players: newPlayers, pendingConditionEffect: null }
   newState = addLog(newState, `Malignità: "${heroCard?.name}" (Forza ${heroCard?.strength}) sconfitto!`, 'condition')
   return newState
@@ -1830,6 +1979,188 @@ export function startGame(state) {
   return initializeGame(state.players)
 }
 
+// ─── NUOVE FUNZIONI MALEFICA ─────────────────────────────────
+
+/**
+ * Risolve l'effetto "puoi" del Principe Filippo: scarta o meno gli Alleati nel suo luogo.
+ */
+export function resolveFilippoDiscard(state, actingPlayerId, targetPlayerId, locationIndex, doDiscard) {
+  if (!doDiscard) {
+    let newState = addLog(state, `Principe Filippo: gli Alleati rimangono in campo.`, 'fate')
+    return newState
+  }
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore non trovato.' }
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+  const loc = target.board.locations[locationIndex]
+  if (!loc) return { error: 'Luogo non valido.' }
+  const villain = VILLAINS[target.villainId]
+  const locName = villain?.locations[locationIndex]?.name || '?'
+  if (loc.allies.length === 0) {
+    return addLog({ ...state, players: newPlayers }, `Principe Filippo: nessun Alleato da scartare in "${locName}".`, 'fate')
+  }
+  const discarded = [...loc.allies]
+  loc.allies = []
+  target.fateDiscard.push(...discarded)
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Principe Filippo scarta ${discarded.length} Alleato/i da "${locName}"!`, 'fate')
+  return newState
+}
+
+/**
+ * Re Stefano forza Malefica in un nuovo luogo (ignora Fuoco Verde, lo scarta).
+ * Chiamata dall'attore Fato dopo aver scelto la destinazione.
+ */
+export function resolveReStefanoMove(state, actingPlayerId, targetPlayerId, destinationIndex) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+  const target = state.players[tidx]
+  if (target.villainId !== 'maleficent') return { error: 'Re Stefano si applica solo a Malefica.' }
+  const villain = VILLAINS[target.villainId]
+  if (destinationIndex < 0 || destinationIndex >= villain.locations.length) return { error: 'Luogo non valido.' }
+
+  const newPlayers = deepClone(state.players)
+  const nt = newPlayers[tidx]
+  const destLoc = nt.board.locations[destinationIndex]
+  const destName = villain.locations[destinationIndex].name
+
+  // Sposta Malefica al nuovo luogo
+  nt.lastLocation = nt.currentLocation
+  nt.currentLocation = destinationIndex
+
+  // Se nel luogo di destinazione c'è Fuoco Verde → scartalo
+  const fvIdx = destLoc.curses.findIndex(id => id.startsWith('mal_c_fuo'))
+  let fvLog = ''
+  if (fvIdx >= 0) {
+    const fvId = destLoc.curses.splice(fvIdx, 1)[0]
+    nt.fateDiscard.push(fvId)
+    fvLog = ` Fuoco Verde scartato da "${destName}"!`
+  }
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Re Stefano sposta Malefica in "${destName}".${fvLog}`, 'fate')
+  return newState
+}
+
+/**
+ * Risolve l'effetto di Re Uberto: sposta un Alleato da un luogo adiacente al suo luogo.
+ */
+export function resolveReUbertoMove(state, actingPlayerId, targetPlayerId, allyId, fromLocIdx, toLocIdx) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+  const target = state.players[tidx]
+  if (target.villainId !== 'maleficent') return { error: 'Re Uberto si applica solo a Malefica.' }
+  if (Math.abs(fromLocIdx - toLocIdx) !== 1) return { error: 'L\'Alleato deve essere in un luogo adiacente.' }
+
+  const villain = VILLAINS[target.villainId]
+  const newPlayers = deepClone(state.players)
+  const nt = newPlayers[tidx]
+  const from = nt.board.locations[fromLocIdx]
+  const to   = nt.board.locations[toLocIdx]
+
+  const idx = from.allies.indexOf(allyId)
+  if (idx < 0) return { error: 'Alleato non trovato nel luogo indicato.' }
+  from.allies.splice(idx, 1)
+  to.allies.push(allyId)
+
+  const fromName = villain.locations[fromLocIdx].name
+  const toName   = villain.locations[toLocIdx].name
+  const allyCard = villain.villainDeck.find(c => c.id === allyId)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Re Uberto sposta "${allyCard?.name || allyId}" da "${fromName}" a "${toName}".`, 'fate')
+  return newState
+}
+
+/**
+ * Risolve C'era una Volta in un Sogno: scarta la maledizione scelta.
+ */
+export function resolveOnceuponatime(state, actingPlayerId, targetPlayerId, curseId, locIdx) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+  const target = state.players[tidx]
+  if (target.villainId !== 'maleficent') return { error: 'Effetto applicabile solo a Malefica.' }
+
+  const loc = target.board.locations[locIdx]
+  if (!loc) return { error: 'Luogo non trovato.' }
+  if (!loc.curses.includes(curseId)) return { error: 'Maledizione non trovata nel luogo indicato.' }
+  if (loc.heroes.length === 0) return { error: 'Non ci sono Eroi in questo luogo.' }
+
+  const villain = VILLAINS[target.villainId]
+  const newPlayers = deepClone(state.players)
+  const nt = newPlayers[tidx]
+  nt.board.locations[locIdx].curses = nt.board.locations[locIdx].curses.filter(id => id !== curseId)
+  nt.fateDiscard.push(curseId)
+
+  const malCard = villain.villainDeck.find(c => c.id === curseId)
+  const locName = villain.locations[locIdx].name
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `C'era una Volta in un Sogno: "${malCard?.name || curseId}" scartata da "${locName}"!`, 'fate')
+  return newState
+}
+
+/**
+ * Forma di Drago: sconfigge un Eroe con Forza effettiva ≤3.
+ * Considera Sonno Senza Sogni (-2 forza).
+ * Arcolaio: guadagna Potere = forza attuale eroe - 1.
+ */
+export function resolveFormadiDrago(state, playerId, heroCardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const player = state.players[pidx]
+  if (player.villainId !== 'maleficent') return { error: 'Effetto solo per Malefica.' }
+  const villain = VILLAINS[player.villainId]
+
+  let heroLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].heroes.includes(heroCardId)) { heroLocIdx = i; break }
+  }
+  if (heroLocIdx < 0) return { error: 'Eroe non trovato nel Reame.' }
+
+  const heroLoc = player.board.locations[heroLocIdx]
+  let heroCard = null
+  for (const p of state.players) {
+    const v = VILLAINS[p.villainId]
+    heroCard = v?.fateDeck.find(c => c.id === heroCardId)
+    if (heroCard) break
+  }
+  const forzaBase = heroCard?.strength || 0
+  const hasSonno = heroLoc.curses.some(id => id.startsWith('mal_c_son'))
+  const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+
+  if (forzaAttuale > 3) {
+    return { error: `Forma di Drago può sconfiggere solo Eroi con Forza effettiva ≤3. Forza attuale di "${heroCard?.name}": ${forzaAttuale}.` }
+  }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  np.board.locations[heroLocIdx].heroes = np.board.locations[heroLocIdx].heroes.filter(id => id !== heroCardId)
+  np.fateDiscard.push(heroCardId)
+  updateCoveredActions(np, heroLocIdx, villain)
+
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Forma di Drago: "${heroCard?.name || heroCardId}" (forza attuale ${forzaAttuale}) sconfitto!`, 'action')
+
+  // Arcolaio: se presente nel luogo dove era l'eroe
+  const arcolaioPresente = heroLoc.items.includes('mal_o_arc')
+  if (arcolaioPresente) {
+    const potereGuadagnato = Math.max(0, forzaAttuale - 1)
+    np.power += potereGuadagnato
+    newState = { ...newState, players: newPlayers }
+    newState = addLog(newState, `Arcolaio: guadagni ${potereGuadagnato} Potere (forza attuale ${forzaAttuale} - 1, tot: ${np.power}).`, 'action')
+  }
+
+  // Flora sconfitta → reset carte scoperte
+  if (heroCardId === 'fmal_flora') {
+    newPlayers[pidx].floraActive = false
+    newState = { ...newState, players: newPlayers }
+    newState = addLog(newState, `Flora sconfitta: Malefica torna a giocare a carte coperte.`, 'action')
+  }
+
+  return newState
+}
+
 // ─── EXPORT UTILS ────────────────────────────────────────────
 
 export default {
@@ -1877,4 +2208,9 @@ export default {
   requestUndo,
   respondUndo,
   endTurn,
+  resolveFilippoDiscard,
+  resolveReStefanoMove,
+  resolveReUbertoMove,
+  resolveOnceuponatime,
+  resolveFormadiDrago,
 }

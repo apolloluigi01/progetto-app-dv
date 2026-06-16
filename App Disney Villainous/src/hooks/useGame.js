@@ -327,6 +327,31 @@ export function useGame(roomCode) {
     return dispatch(engine.respondUndo, myPlayerId, approved)
   }, [dispatch, myPlayerId])
 
+  // ── Malefica: Principe Filippo — scarta alleati nel suo luogo ───
+  const resolveFilippoDiscard = useCallback((targetPlayerId, locationIndex, doDiscard) => {
+    return dispatch(engine.resolveFilippoDiscard, myPlayerId, targetPlayerId, locationIndex, doDiscard)
+  }, [dispatch, myPlayerId])
+
+  // ── Malefica: Re Stefano — sposta Malefica ───────────────
+  const resolveReStefanoMove = useCallback((targetPlayerId, destinationIndex) => {
+    return dispatch(engine.resolveReStefanoMove, myPlayerId, targetPlayerId, destinationIndex)
+  }, [dispatch, myPlayerId])
+
+  // ── Malefica: Re Uberto — sposta alleato adiacente ───────
+  const resolveReUbertoMove = useCallback((targetPlayerId, allyId, fromLocIdx, toLocIdx) => {
+    return dispatch(engine.resolveReUbertoMove, myPlayerId, targetPlayerId, allyId, fromLocIdx, toLocIdx)
+  }, [dispatch, myPlayerId])
+
+  // ── Malefica: C'era una Volta in un Sogno ────────────────
+  const resolveOnceuponatime = useCallback((targetPlayerId, curseId, locIdx) => {
+    return dispatch(engine.resolveOnceuponatime, myPlayerId, targetPlayerId, curseId, locIdx)
+  }, [dispatch, myPlayerId])
+
+  // ── Malefica: Forma di Drago — sconfiggi eroe ≤3 ─────────
+  const resolveFormadiDrago = useCallback((heroCardId) => {
+    return dispatch(engine.resolveFormadiDrago, myPlayerId, heroCardId)
+  }, [dispatch, myPlayerId])
+
   // ── End Turn (manuale fallback) ──────────────────────────
   const endTurn = useCallback(() => {
     return dispatch(engine.endTurn)
@@ -393,5 +418,10 @@ export function useGame(roomCode) {
     endTurn,
     drawCards,
     fetchGame,
+    resolveFilippoDiscard,
+    resolveReStefanoMove,
+    resolveReUbertoMove,
+    resolveOnceuponatime,
+    resolveFormadiDrago,
   }
 }
