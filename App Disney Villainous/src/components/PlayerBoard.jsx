@@ -40,12 +40,12 @@ export default function PlayerBoard({
     if (!onLocationClick) return false
     if (locState.isLocked) return false
     if (!isMyBoard) return true // plancia avversario: fate_resolve o condition fate
+    // Corvo: può muoversi in QUALSIASI luogo (anche quello di Malefica) — check prima di 'move'
+    if (activeMode === 'corvo_dest_pick') return true
     if (phase === 'move') return i !== player.currentLocation || player.svanireActive === true
     if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
     // Condizioni: selezione luogo per alleato gratuito o Ossessione
     if (activeMode === 'cond_play_ally_location' || activeMode === 'cond_ossessione_location') return true
-    // Corvo: selezione destinazione
-    if (activeMode === 'corvo_dest_pick') return true
     return false
   }
 

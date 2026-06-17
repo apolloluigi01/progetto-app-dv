@@ -1201,6 +1201,9 @@ export default function Game() {
               <div className="bg-purple-950/40 border border-purple-700/50 rounded-xl p-4">
                 <h3 className="font-display text-purple-300 font-bold mb-3 text-sm">
                   🔮 Scegli 1 carta — l'altra torna allo scarto del Fato
+                  {gameState.pendingFate.unplayableIds?.length > 0 && (
+                    <span className="ml-2 text-yellow-500 text-[10px] font-normal">(1 carta non giocabile)</span>
+                  )}
                 </h3>
 
                 {/* Conferma prima di giocare */}
@@ -1221,12 +1224,19 @@ export default function Game() {
                       const target = gameState.players.find(p => p.id === gameState.pendingFate.targetPlayerId)
                       const card   = VILLAINS[target?.villainId]?.fateDeck.find(c => c.id === cardId)
                       if (!card) return null
+                      const isUnplayable = gameState.pendingFate.unplayableIds?.includes(cardId)
                       return (
-                        <div key={cardId} className="flex flex-col items-center gap-2">
-                          <Card card={card} onClick={() => handleFateCardClick(cardId)} />
-                          <button onClick={() => handleFateCardClick(cardId)} className="btn-fate text-xs px-4">
-                            Gioca questa
-                          </button>
+                        <div key={cardId} className={`flex flex-col items-center gap-2 ${isUnplayable ? 'opacity-40 select-none' : ''}`}>
+                          <Card card={card} onClick={isUnplayable ? undefined : () => handleFateCardClick(cardId)} />
+                          {isUnplayable ? (
+                            <span className="text-[10px] text-yellow-600 italic bg-yellow-950/40 border border-yellow-800/40 rounded px-2 py-0.5">
+                              Non giocabile
+                            </span>
+                          ) : (
+                            <button onClick={() => handleFateCardClick(cardId)} className="btn-fate text-xs px-4">
+                              Gioca questa
+                            </button>
+                          )}
                         </div>
                       )
                     })}

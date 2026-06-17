@@ -229,7 +229,7 @@ export function getCardObjects(player, cardIds) {
  * Viene chiamato all'INIZIO del turno del giocatore (dopo move, prima delle azioni).
  * Ritorna true se il giocatore ha vinto.
  */
-export function checkWinCondition(state, playerId) {
+export function checkWinCondition(state, playerId, isTurnStart = false) {
   const player = getPlayerById(state, playerId)
   if (!player) return false
   const villain = VILLAINS[player.villainId]
@@ -237,7 +237,8 @@ export function checkWinCondition(state, playerId) {
 
   switch (villain.winConditionId) {
     case 'curse_all_locations': {
-      // Malefica: almeno 1 Maledizione in ognuno dei 4 luoghi
+      // Malefica vince solo all'INIZIO del turno (moveVillain), non appena piazza le maledizioni
+      if (!isTurnStart) return false
       return player.board.locations.every(loc => loc.curses.length > 0)
     }
     case 'lamp_and_genie': {
@@ -302,15 +303,6 @@ export function moveVillain(state, playerId, locationIndex) {
     return { error: 'Non è il momento di muoversi.' }
   }
 
-  // Fuoco Verde: Malefica non può muoversi volontariamente in un luogo con Fuoco Verde
-  if (player.villainId === 'maleficent') {
-    const destLoc = player.board.locations[locationIndex]
-    const hasGreenFire = destLoc.curses.some(id => id.startsWith('mal_c_fuo'))
-    if (hasGreenFire) {
-      return { error: 'Non puoi muoverti in questo luogo: è bloccato da Fuoco Verde.' }
-    }
-  }
-
   const newPlayers = deepClone(state.players)
   newPlayers[pidx].lastLocation    = newPlayers[pidx].currentLocation
   newPlayers[pidx].currentLocation = locationIndex
@@ -318,6 +310,18 @@ export function moveVillain(state, playerId, locationIndex) {
   if (svanireActive) newPlayers[pidx].svanireActive = false
   // Reset Forma di Drago all'inizio del nuovo turno
   if (newPlayers[pidx].dragonFormActive) newPlayers[pidx].dragonFormActive = false
+
+  // Fuoco Verde: Malefica PUÒ spostarsi nel luogo, ma la Maledizione viene scartata all'ingresso
+  let fuocoVerdeLog = ''
+  if (player.villainId === 'maleficent') {
+    const destLocState = newPlayers[pidx].board.locations[locationIndex]
+    const fvIdx = destLocState.curses.findIndex(id => id.startsWith('mal_c_fuo'))
+    if (fvIdx >= 0) {
+      const fvId = destLocState.curses.splice(fvIdx, 1)[0]
+      newPlayers[pidx].fateDiscard.push(fvId)
+      fuocoVerdeLog = ` Fuoco Verde scartato!`
+    }
+  }
 
   // Costruisce la coda delle azioni per questo turno
   const loc = villain.locations[locationIndex]
@@ -337,7 +341,7 @@ export function moveVillain(state, playerId, locationIndex) {
   }
 
   const locName = villain.locations[locationIndex].name
-  newState = addLog(newState, `${player.name} si sposta in "${locName}".`, 'move')
+  newState = addLog(newState, `${player.name} si sposta in "${locName}".${fuocoVerdeLog}`, 'move')
 
   // ── Tic Tac: se Hook si sposta nel suo luogo, scarta tutta la mano ──
   if (player.villainId === 'hook') {
@@ -352,7 +356,7 @@ export function moveVillain(state, playerId, locationIndex) {
   }
 
   // Check win condition all'inizio del turno (dopo move, prima delle azioni)
-  if (checkWinCondition(newState, playerId)) {
+  if (checkWinCondition(newState, playerId, true)) {
     newState = {
       ...newState,
       status: 'game_over',
@@ -1224,7 +1228,8 @@ export function startFate(state, playerId, targetPlayerId) {
   const actor  = getPlayerById(state, playerId)
   const targetP = getPlayerById(state, targetPlayerId)
 
-  // ── Controllo fato nullo: entrambe le carte non giocabili ──────
+  // ── Controllo fato nullo / carte non giocabili ──────────────
+  const unplayableIds = []
   {
     const targetVillain = VILLAINS[target.villainId]
     const fateCard1 = targetVillain?.fateDeck.find(c => c.id === drawn[0])
@@ -1233,7 +1238,7 @@ export function startFate(state, playerId, targetPlayerId) {
     const can2 = fateCard2 ? canFateCardBePlayed(fateCard2, target) : false
 
     if (!can1 && !can2) {
-      // Fato nullo: nessuna carta è giocabile
+      // Fato nullo: nessuna carta è giocabile → scarta tutto, niente scelta
       target.fateDiscard.push(...drawn)
       newPlayers[tidx] = target
       let voidState = { ...state, players: newPlayers, fateDoneThisTurn: true }
@@ -1245,13 +1250,11 @@ export function startFate(state, playerId, targetPlayerId) {
         'fate')
       return voidState
     } else if (!can1 && can2) {
-      // Scarta automaticamente la prima carta non giocabile
-      target.fateDiscard.push(drawn[0])
-      drawn.splice(0, 1)
+      // Prima carta non giocabile: visibile ma non selezionabile
+      unplayableIds.push(drawn[0])
     } else if (can1 && fateCard2 && !can2) {
-      // Scarta automaticamente la seconda carta non giocabile
-      target.fateDiscard.push(drawn[1])
-      drawn.splice(1, 1)
+      // Seconda carta non giocabile: visibile ma non selezionabile
+      unplayableIds.push(drawn[1])
     }
     newPlayers[tidx] = target
   }
@@ -1294,6 +1297,7 @@ export function startFate(state, playerId, targetPlayerId) {
       actingPlayerId: playerId,
       targetPlayerId,
       cards: drawn,
+      unplayableIds,
     },
   }
 
@@ -1302,6 +1306,11 @@ export function startFate(state, playerId, targetPlayerId) {
     `${actor?.name} usa Fato contro ${targetP?.name}! (pescate ${drawn.length} carte)`,
     'fate'
   )
+  if (unplayableIds.length > 0) {
+    const tVillain = VILLAINS[target.villainId]
+    const unplayableNames = unplayableIds.map(id => tVillain?.fateDeck.find(c => c.id === id)?.name || id).join(', ')
+    newState = addLog(newState, `⚠️ "${unplayableNames}" non può essere giocata (condizioni non soddisfatte) — verrà scartata automaticamente.`, 'fate')
+  }
   if (target.villainId === 'maleficent' && target.dragonFormActive) {
     newState = addLog(newState, `🐉 Forma di Drago: Malefica guadagna 3 Potere (tot: ${target.power})!`, 'fate')
   }
@@ -1664,7 +1673,7 @@ export function respondConditionActivation(state, responderId, approved) {
   const cid = pending.cardId
 
   if (cid.startsWith('mal_k_tir')) {
-    if (np.villainDeck.length === 0) { np.villainDeck = shuffle([...np.villainDiscard]); np.villainDiscard = [] }
+    if (np.villainDeck.length < 3 && np.villainDiscard.length > 0) { np.villainDeck = [...np.villainDeck, ...shuffle([...np.villainDiscard])]; np.villainDiscard = [] }
     const drawn = np.villainDeck.splice(0, Math.min(3, np.villainDeck.length))
     np.hand = [...np.hand, ...drawn]
     condEffect = { type: 'discard_n_cards', playerId: pending.playerId, count: 2, discarded: 0 }
