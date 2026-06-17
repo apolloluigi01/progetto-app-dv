@@ -9,6 +9,7 @@ import VillainSelect  from './VillainSelect.jsx'
 import PlayerBoard    from './PlayerBoard.jsx'
 import Card           from './Card.jsx'
 import { VILLAINS, ACTION_LABELS, ACTION_COLORS }   from '../data/villains.js'
+import { getHeroEffectiveStrength, getAllyEffectiveStrength } from '../engine/gameEngine.js'
 
 const VILLAIN_EMOJI = {
   maleficent:      '🧙‍♀️',
@@ -468,7 +469,11 @@ export default function Game() {
 
   // ── Scontro ───────────────────────────────────────────────
   function handleVanquishSelectHero(heroId) {
-    setModeData(prev => ({ ...prev, selectedHeroId: prev.selectedHeroId === heroId ? null : heroId }))
+    setModeData(prev => ({
+      ...prev,
+      selectedHeroId: prev.selectedHeroId === heroId ? null : heroId,
+      selectedAllyIds: [], // reset allies: la selezione cambia luogo
+    }))
   }
   function handleVanquishToggleAlly(allyId) {
     setModeData(prev => {
@@ -489,13 +494,19 @@ export default function Game() {
 
   function getHeroStrength(heroId) {
     const c = findCardFromAll(gameState, heroId)
-    return c?.strength || 0
+    if (!c) return 0
+    const locState = myPlayer?.board.locations.find(loc => loc.heroes?.includes(heroId))
+    if (!locState) return c.strength || 0
+    const allCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
+    return getHeroEffectiveStrength(heroId, c, locState, allCards)
   }
   function getAllyStrength() {
     if (!myVillain || !modeData.selectedAllyIds) return 0
     return modeData.selectedAllyIds.reduce((sum, id) => {
       const c = myVillain.villainDeck.find(x => x.id === id)
-      return sum + (c?.strength || 0)
+      if (!c) return sum
+      const locState = myPlayer?.board.locations.find(loc => loc.allies?.includes(id))
+      return sum + (locState ? getAllyEffectiveStrength(id, c, locState) : (c.strength || 0))
     }, 0)
   }
 
@@ -1148,11 +1159,28 @@ export default function Game() {
               {isMyTurn && mode === 'vanquish_mode' && (
                 <VanquishPanel
                   myVillain={myVillain}
-                  heroes={myPlayer.board.locations.flatMap((loc, i) =>
-                    loc.heroes.map(id => ({ id, locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}` }))
-                  )}
+                  heroes={myPlayer.board.locations.flatMap((loc, i) => {
+                    const allCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
+                    return loc.heroes.map(id => {
+                      const card = allCards.find(c => c.id === id)
+                      return {
+                        id,
+                        locIdx: i,
+                        locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}`,
+                        effectiveStrength: card ? getHeroEffectiveStrength(id, card, loc, allCards) : 0,
+                      }
+                    })
+                  })}
                   allies={myPlayer.board.locations.flatMap((loc, i) =>
-                    loc.allies.map(id => ({ id, locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}` }))
+                    loc.allies.map(id => {
+                      const card = myVillain?.villainDeck.find(c => c.id === id)
+                      return {
+                        id,
+                        locIdx: i,
+                        locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}`,
+                        effectiveStrength: card ? getAllyEffectiveStrength(id, card, loc) : 0,
+                      }
+                    })
                   )}
                   selectedHeroId={modeData.selectedHeroId}
                   selectedAllyIds={modeData.selectedAllyIds || []}
@@ -1162,7 +1190,6 @@ export default function Game() {
                   onToggleAlly={handleVanquishToggleAlly}
                   onConfirm={handleConfirmVanquish}
                   onCancel={resetMode}
-                  findCard={id => findCardFromAll(gameState, id)}
                 />
               )}
             </section>
@@ -1626,32 +1653,44 @@ function ConfirmPanel({ message, sub, onConfirm, onCancel, confirmLabel = '✓ C
 }
 
 function VanquishPanel({ myVillain, heroes, allies, selectedHeroId, selectedAllyIds,
-  allyStrength, heroStrength, onSelectHero, onToggleAlly, onConfirm, onCancel, findCard }) {
+  allyStrength, heroStrength, onSelectHero, onToggleAlly, onConfirm, onCancel }) {
   const canConfirm = selectedHeroId && selectedAllyIds.length > 0 && allyStrength >= heroStrength
+  // Trova il locIdx dell'eroe selezionato per filtrare gli alleati
+  const selectedHeroLocIdx = selectedHeroId
+    ? heroes.find(h => h.id === selectedHeroId)?.locIdx ?? null
+    : null
+  const filteredAllies = selectedHeroLocIdx !== null
+    ? allies.filter(a => a.locIdx === selectedHeroLocIdx)
+    : allies
   return (
     <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4 flex flex-col gap-3">
       <h3 className="font-display text-red-300 font-bold text-sm">⚔️ Scontro</h3>
       <div>
-        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-1">1. Eroe da sconfiggere (qualsiasi luogo)</p>
+        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-1">1. Eroe da sconfiggere</p>
         <div className="flex gap-2 flex-wrap">
-          {heroes.map(({ id: heroId, locName }) => {
-            const card = findCard(heroId)
-            const sel  = selectedHeroId === heroId
+          {heroes.map(({ id: heroId, locName, effectiveStrength }) => {
+            const sel = selectedHeroId === heroId
+            const card = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck].find(c => c.id === heroId) : null
             return (
               <button key={heroId} onClick={() => onSelectHero(heroId)}
                       className={['text-xs px-3 py-1.5 rounded-lg border font-display transition-all',
                         sel ? 'bg-red-700 border-red-500 text-white'
                             : 'bg-gray-800 border-gray-700 text-gray-300 hover:border-red-600'].join(' ')}>
-                🛡️ {card?.name || heroId} (F:{card?.strength ?? '?'}) — {locName}
+                🛡️ {card?.name || heroId} (F:{effectiveStrength}) — {locName}
               </button>
             )
           })}
         </div>
       </div>
       <div>
-        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-1">2. Alleati da usare (qualsiasi luogo)</p>
+        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-1">
+          2. Alleati da usare{selectedHeroLocIdx !== null ? ` (stesso luogo dell'eroe)` : ''}
+        </p>
+        {filteredAllies.length === 0 && selectedHeroId && (
+          <p className="text-[11px] text-yellow-500 italic">Nessun alleato nel luogo dell'eroe selezionato.</p>
+        )}
         <div className="flex gap-2 flex-wrap">
-          {allies.map(({ id: allyId, locName }) => {
+          {filteredAllies.map(({ id: allyId, locName, effectiveStrength }) => {
             const card = myVillain?.villainDeck.find(c => c.id === allyId)
             const sel  = selectedAllyIds.includes(allyId)
             return (
@@ -1659,7 +1698,7 @@ function VanquishPanel({ myVillain, heroes, allies, selectedHeroId, selectedAlly
                       className={['text-xs px-3 py-1.5 rounded-lg border font-display transition-all',
                         sel ? 'bg-blue-700 border-blue-500 text-white'
                             : 'bg-gray-800 border-gray-700 text-gray-300 hover:border-blue-600'].join(' ')}>
-                ⚔️ {card?.name || allyId} (F:{card?.strength ?? '?'}) — {locName}
+                ⚔️ {card?.name || allyId} (F:{effectiveStrength}) — {locName}
               </button>
             )
           })}

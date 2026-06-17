@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { VILLAINS, ACTION_LABELS, ACTION_COLORS, CARD_TYPE_COLORS, CARD_TYPE_LABELS } from '../data/villains.js'
+import { getHeroEffectiveStrength, getAllyEffectiveStrength } from '../engine/gameEngine.js'
 
 const VILLAIN_EMOJI = {
   maleficent:      '🧙‍♀️',
@@ -201,6 +202,16 @@ export default function Location({
           const card    = findCard(id)
           const isSel   = selectedCardId === id
           const clickable = !!onAllyItemClick
+          // Forza effettiva con modificatori dinamici
+          const effStrength = card ? getAllyEffectiveStrength(id, card, locationState) : null
+          const mods = []
+          if (card && id.startsWith('mal_a_gra') && locationState.heroes?.length > 0)
+            mods.push(`+${locationState.heroes.length} eroi`)
+          if (card && id.startsWith('mal_a_sin') && locationState.curses?.length > 0)
+            mods.push('+1 malediz.')
+          const strengthLabel = effStrength !== null
+            ? `${effStrength}${mods.length ? ` [${mods.join(', ')}]` : ''}`
+            : '?'
           return (
             <span key={id}
                   onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
@@ -211,29 +222,41 @@ export default function Location({
                       : 'bg-blue-900/60 border-blue-700/50 text-blue-300',
                     clickable ? 'cursor-pointer hover:border-blue-400' : '',
                   ].join(' ')}
-                  title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
-              ⚔️ {card?.name || id} ({card?.strength ?? '?'})
+                  title={`Forza base: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
+              ⚔️ {card?.name || id} ({strengthLabel})
               {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
         })}
 
+        {/* Oggetti villain (amber) e oggetti fato NON assegnati (teal) */}
         {locationState.items?.map(id => {
           const card    = findCard(id)
           const isSel   = selectedCardId === id
           const clickable = !!onAllyItemClick
+          // Verifica se è un oggetto fato (nella fateDeck) o oggetto villain
+          const isFateItem = card?.type === 'fate_item'
+          // Se è un oggetto fato già assegnato a un eroe: non mostrarlo qui (appare sull'eroe)
+          const assignments = locationState.fateItemAssignments || {}
+          const isAssigned = isFateItem && Object.keys(assignments).includes(id)
+          if (isAssigned) return null
           return (
             <span key={id}
                   onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
                   className={[
                     'text-[9px] px-1.5 py-0.5 rounded border transition-all',
-                    isSel
-                      ? 'bg-amber-600 border-amber-400 text-white ring-1 ring-amber-300'
-                      : 'bg-amber-900/60 border-amber-700/50 text-amber-300',
+                    isFateItem
+                      ? isSel
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-1 ring-cyan-300'
+                        : 'bg-cyan-900/60 border-cyan-600/60 text-cyan-200'
+                      : isSel
+                        ? 'bg-amber-600 border-amber-400 text-white ring-1 ring-amber-300'
+                        : 'bg-amber-900/60 border-amber-700/50 text-amber-300',
                     clickable ? 'cursor-pointer hover:border-amber-400' : '',
                   ].join(' ')}
-                  title={card?.effect || id}>
-              📦 {card?.name || id}
+                  title={`${isFateItem ? '🔮 Oggetto Fato (non assegnato) — ' : ''}${card?.effect || id}`}>
+              {isFateItem ? '🔮' : '📦'} {card?.name || id}
+              {isFateItem && <span className="ml-0.5 text-cyan-500 text-[8px]"> (Fato)</span>}
               {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
             </span>
           )
@@ -241,21 +264,39 @@ export default function Location({
 
         {locationState.heroes?.map(id => {
           const card = findCard(id)
-          // Mostra eventuali oggetti fato assegnati a questo eroe
           const assignments = locationState.fateItemAssignments || {}
-          const assignedItems = Object.entries(assignments)
-            .filter(([, heroId]) => heroId === id)
-            .map(([itemId]) => findCard(itemId)?.name || itemId)
+          // Calcola forza effettiva e modificatori
+          const allCardsFlat = [...villain.villainDeck, ...villain.fateDeck]
+          const effStrength = card ? getHeroEffectiveStrength(id, card, locationState, allCardsFlat) : null
+          const mods = []
+          if (locationState.curses?.some(cid => cid.startsWith('mal_c_son'))) mods.push('-2 Sonno')
+          const assignedEntries = Object.entries(assignments).filter(([, hId]) => hId === id)
+          for (const [itemId] of assignedEntries) {
+            const itemCard = allCardsFlat.find(c => c.id === itemId)
+            if (itemCard) {
+              const match = itemCard.effect?.match(/\+(\d+) Forza/)
+              if (match) mods.push(`+${match[1]} ${itemCard.name}`)
+            }
+          }
+          const strengthLabel = effStrength !== null
+            ? `${effStrength}${mods.length ? ` [${mods.join(', ')}]` : ''}`
+            : '?'
           return (
             <span key={id}
                   className="text-[9px] bg-emerald-900/60 border border-emerald-700/50 text-emerald-300
                              px-1.5 py-0.5 rounded"
-                  title={`Forza: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
-              🛡️ {card?.name || id} ({card?.strength ?? '?'})
+                  title={`Forza base: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
+              🛡️ {card?.name || id} ({strengthLabel})
               {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
-              {assignedItems.length > 0 && (
-                <span className="text-amber-400"> [+{assignedItems.join(', ')}]</span>
-              )}
+              {/* Oggetti Fato assegnati a questo eroe */}
+              {assignedEntries.map(([itemId]) => {
+                const itemCard = allCardsFlat.find(c => c.id === itemId)
+                return (
+                  <span key={itemId} className="ml-1 text-cyan-300 text-[8px] bg-cyan-900/50 border border-cyan-700/50 rounded px-1">
+                    🔮 {itemCard?.name || itemId}
+                  </span>
+                )
+              })}
             </span>
           )
         })}

@@ -42,6 +42,69 @@ function addLog(state, message, type = 'info') {
   }
 }
 
+// Calcola la forza effettiva di un eroe considerando tutti i modificatori attivi.
+// - Sonno Senza Sogni nel luogo: -2
+// - Oggetti Fato assegnati (es. Spada della Verità: +2): letti dall'effetto "+N Forza"
+function getHeroEffectiveStrength(heroCardId, heroCard, locationState, allCards) {
+  const base = heroCard?.strength || 0
+  const hasSonno = locationState.curses?.some(id => id.startsWith('mal_c_son'))
+  const fateItemBonus = Object.entries(locationState.fateItemAssignments || {})
+    .filter(([, hId]) => hId === heroCardId)
+    .reduce((sum, [itemId]) => {
+      const itemCard = allCards.find(c => c.id === itemId)
+      const match = itemCard?.effect?.match(/\+(\d+) Forza/)
+      return sum + (match ? parseInt(match[1]) : 0)
+    }, 0)
+  return Math.max(0, base - (hasSonno ? 2 : 0) + fateItemBonus)
+}
+
+// Calcola la forza effettiva di un alleato considerando i modificatori dinamici.
+function getAllyEffectiveStrength(allyId, allyCard, locationState) {
+  let strength = allyCard?.strength || 0
+  if (allyId.startsWith('mal_a_gra')) strength += (locationState.heroes?.length || 0)
+  if (allyId.startsWith('mal_a_sin') && (locationState.curses?.length || 0) > 0) strength += 1
+  return Math.max(0, strength)
+}
+
+// Verifica se una carta Fato può essere legalmente giocata sul bersaglio.
+function canFateCardBePlayed(fateCard, targetPlayer) {
+  if (!fateCard) return false
+  if (fateCard.type === 'hero') {
+    // Non giocabile se TUTTI i luoghi hanno Fuoco Verde
+    const allBlocked = targetPlayer.board.locations.every(loc =>
+      loc.curses?.some(id => id.startsWith('mal_c_fuo'))
+    )
+    return !allBlocked
+  }
+  if (fateCard.type === 'fate_item' && fateCard.effect?.includes('Assegna a un Eroe')) {
+    return targetPlayer.board.locations.some(loc => loc.heroes?.length > 0)
+  }
+  if (fateCard.type === 'fate_effect') {
+    // C'era una Volta in un Sogno: serve almeno un luogo con maledizione E eroe
+    if (fateCard.id?.startsWith('fmal_sogno')) {
+      return targetPlayer.board.locations.some(loc =>
+        loc.curses?.length > 0 && loc.heroes?.length > 0
+      )
+    }
+    return true
+  }
+  return true
+}
+
+// Rimuove oggetti Fato assegnati a un eroe sconfitto (li manda nel fateDiscard).
+function discardAssignedFateItems(np, heroCardId, heroLocIdx) {
+  const loc = np.board.locations[heroLocIdx]
+  const assignments = loc.fateItemAssignments || {}
+  for (const [itemId, hId] of Object.entries(assignments)) {
+    if (hId === heroCardId) {
+      const idx = loc.items.indexOf(itemId)
+      if (idx >= 0) loc.items.splice(idx, 1)
+      delete loc.fateItemAssignments[itemId]
+      np.fateDiscard.push(itemId)
+    }
+  }
+}
+
 // Ricalcola coveredActionIndices in base agli Eroi presenti in un luogo.
 // I luoghi con 4 azioni hanno top-row (indici 0,1) coperta dagli Eroi.
 // I luoghi con <4 azioni (es. Prigione) non hanno top-row e gli Eroi non coprono nulla.
@@ -821,7 +884,10 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
 
   let newState = { ...state, players: newPlayers }
   const locName = villain.locations[targetLocIdx].name
-  newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}".`, 'action')
+  let costDesc = `costo ${finalCost}`
+  if (bastonBonus > 0) costDesc += ` (${card.cost}-1 Bastone)`
+  if (spadaBonus > 0) costDesc += ` (+2 Spada della Verità)`
+  newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}" (${costDesc}).`, 'action')
 
   for (const msg of specialLogs) {
     newState = addLog(newState, msg, 'action')
@@ -1009,18 +1075,20 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     return { error: 'L\'Eroe non è presente nel tuo Reame.' }
   }
 
-  // Verifica che tutti gli alleati esistano in qualsiasi luogo del Reame
+  // Verifica che tutti gli alleati siano nello STESSO luogo dell'Eroe
   for (const allyId of allyCardIds) {
-    const found = player.board.locations.some(loc => loc.allies.includes(allyId))
-    if (!found) {
-      return { error: `L\'Alleato ${allyId} non è presente nel tuo Reame.` }
+    const inSameLoc = player.board.locations[heroLocIdx].allies.includes(allyId)
+    if (!inSameLoc) {
+      const locName = villain.locations[heroLocIdx].name
+      return { error: `Lo Scontro può avvenire solo tra Alleati ed Eroi nello stesso luogo. L'Alleato non si trova in "${locName}".` }
     }
   }
 
-  // Calcola forza totale alleati
+  // Calcola forza totale alleati (con modificatori dinamici)
+  const heroLocState = player.board.locations[heroLocIdx]
   const totalAllyStrength = allyCardIds.reduce((sum, allyId) => {
     const ally = villain.villainDeck.find(c => c.id === allyId)
-    return sum + (ally?.strength || 0)
+    return sum + getAllyEffectiveStrength(allyId, ally, heroLocState)
   }, 0)
 
   // Forza dell'Eroe: cerca in tutti i mazzi Fato di tutti i giocatori
@@ -1030,11 +1098,17 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     heroCard = v?.fateDeck.find(c => c.id === heroCardId)
     if (heroCard) break
   }
-  const heroStrength = heroCard?.strength || 0
+
+  // Forza effettiva eroe (considera Sonno Senza Sogni e oggetti Fato assegnati)
+  const allCards = state.players.flatMap(p => {
+    const v = VILLAINS[p.villainId]
+    return v ? [...v.villainDeck, ...v.fateDeck] : []
+  })
+  const heroStrength = getHeroEffectiveStrength(heroCardId, heroCard, player.board.locations[heroLocIdx], allCards)
 
   if (totalAllyStrength < heroStrength) {
     return {
-      error: `Forza insufficiente. Alleati: ${totalAllyStrength}, Eroe: ${heroStrength}.`
+      error: `Forza insufficiente. Alleati: ${totalAllyStrength}, Eroe (effettiva): ${heroStrength}.`
     }
   }
 
@@ -1049,46 +1123,48 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
   const np = newPlayers[pidx]
   const nloc = np.board.locations[heroLocIdx]
 
-  // ── Malefica: Arcolaio → guadagna Potere = forza attuale dell'Eroe sconfitto - 1
-  // (calcolato PRIMA della rimozione dell'eroe, per leggere le maledizioni nel luogo)
+  // ── Malefica: Arcolaio → guadagna Potere = forza EFFETTIVA dell'Eroe - 1
+  // (calcolato PRIMA della rimozione dell'eroe, per leggere modificatori del luogo)
+  let arcolaioLog = ''
   if (player.villainId === 'maleficent') {
     const arcolaioPresente = nloc.items.includes('mal_o_arc')
     if (arcolaioPresente) {
-      // Forza attuale = base - 2 se c'è Sonno Senza Sogni nel luogo
-      const hasSonno = nloc.curses.some(id => id.startsWith('mal_c_son'))
-      const forzaBase = heroCard?.strength || 0
-      const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+      const forzaAttuale = heroStrength // già calcolata con tutti i modificatori
       const potereGuadagnato = Math.max(0, forzaAttuale - 1)
       np.power += potereGuadagnato
+      arcolaioLog = `Arcolaio: "${heroCard?.name}" forza effettiva ${forzaAttuale} → +${potereGuadagnato} Potere (tot: ${np.power}).`
     }
   }
 
-  // Rimuovi l'Eroe dal luogo in cui si trovava
+  // Rimuovi oggetti Fato assegnati all'Eroe sconfitto
+  discardAssignedFateItems(np, heroCardId, heroLocIdx)
+
+  // Rimuovi l'Eroe dal luogo
   nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
 
-  // Ricalcola copertura azioni per il luogo da cui è stato rimosso l'Eroe
+  // Rimuovi e scarta gli Alleati usati per lo Scontro
+  const discardedAllyNames = []
+  for (const allyId of allyCardIds) {
+    const idx = nloc.allies.indexOf(allyId)
+    if (idx >= 0) nloc.allies.splice(idx, 1)
+    np.villainDiscard.push(allyId)
+    const allyCard = villain.villainDeck.find(c => c.id === allyId)
+    discardedAllyNames.push(allyCard?.name || allyId)
+  }
+
+  // Ricalcola copertura azioni
   updateCoveredActions(newPlayers[pidx], heroLocIdx, villain)
 
   let newState = { ...state, players: newPlayers }
   const locName = villain.locations[heroLocIdx].name
   newState = addLog(
     newState,
-    `${player.name} sconfigge "${heroCard?.name || heroCardId}" in "${locName}" (forza alleati: ${totalAllyStrength} vs ${heroStrength}).`,
+    `${player.name} sconfigge "${heroCard?.name || heroCardId}" in "${locName}" (forza alleati: ${totalAllyStrength} vs ${heroStrength}). Alleati scartati: ${discardedAllyNames.join(', ')}.`,
     'action'
   )
 
-  // Log Arcolaio (dopo la modifica dello state)
-  if (player.villainId === 'maleficent') {
-    const arcolaioPresente = player.board.locations[heroLocIdx].items.includes('mal_o_arc')
-    if (arcolaioPresente) {
-      const hasSonno = player.board.locations[heroLocIdx].curses.some(id => id.startsWith('mal_c_son'))
-      const forzaBase = heroCard?.strength || 0
-      const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
-      const potereGuadagnato = Math.max(0, forzaAttuale - 1)
-      newState = addLog(newState, `Arcolaio: "${heroCard?.name}" sconfitto con forza attuale ${forzaAttuale} → guadagni ${potereGuadagnato} Potere (tot: ${newPlayers[pidx].power}).`, 'action')
-    }
-  }
+  if (arcolaioLog) newState = addLog(newState, arcolaioLog, 'action')
 
   // Flora sconfitta → reset carte scoperte
   if (heroCardId === 'fmal_flora' && player.villainId === 'maleficent') {
@@ -1133,11 +1209,52 @@ export function startFate(state, playerId, targetPlayerId) {
     target.fateDiscard = []
   }
 
-  const drawn = target.fateDeck.splice(0, 2)
-  if (drawn.length === 0) return { error: 'Il mazzo Fato dell\'avversario è vuoto.' }
+  // Pesca la prima carta
+  const firstCard = target.fateDeck.splice(0, 1)
+  if (firstCard.length === 0) return { error: 'Il mazzo Fato dell\'avversario è vuoto.' }
+
+  // Se il mazzo era arrivato a 1 carta, mischia gli scarti e pesca la seconda
+  if (target.fateDeck.length === 0 && target.fateDiscard.length > 0) {
+    target.fateDeck   = shuffle([...target.fateDiscard])
+    target.fateDiscard = []
+  }
+  const secondCard = target.fateDeck.splice(0, 1)
+  const drawn = [...firstCard, ...secondCard]
 
   const actor  = getPlayerById(state, playerId)
   const targetP = getPlayerById(state, targetPlayerId)
+
+  // ── Controllo fato nullo: entrambe le carte non giocabili ──────
+  {
+    const targetVillain = VILLAINS[target.villainId]
+    const fateCard1 = targetVillain?.fateDeck.find(c => c.id === drawn[0])
+    const fateCard2 = drawn[1] ? targetVillain?.fateDeck.find(c => c.id === drawn[1]) : null
+    const can1 = canFateCardBePlayed(fateCard1, target)
+    const can2 = fateCard2 ? canFateCardBePlayed(fateCard2, target) : false
+
+    if (!can1 && !can2) {
+      // Fato nullo: nessuna carta è giocabile
+      target.fateDiscard.push(...drawn)
+      newPlayers[tidx] = target
+      let voidState = { ...state, players: newPlayers, fateDoneThisTurn: true }
+      voidState = addLog(voidState, `${actor?.name} usa Fato contro ${targetP?.name}! (pescate ${drawn.length} carte)`, 'fate')
+      const n1 = fateCard1?.name || drawn[0]
+      const n2 = fateCard2?.name || drawn[1] || ''
+      voidState = addLog(voidState,
+        `⚠️ Fato a vuoto! "${n1}"${fateCard2 ? ` e "${n2}"` : ''} non possono essere giocate (condizioni non soddisfatte). Entrambe scartate.`,
+        'fate')
+      return voidState
+    } else if (!can1 && can2) {
+      // Scarta automaticamente la prima carta non giocabile
+      target.fateDiscard.push(drawn[0])
+      drawn.splice(0, 1)
+    } else if (can1 && fateCard2 && !can2) {
+      // Scarta automaticamente la seconda carta non giocabile
+      target.fateDiscard.push(drawn[1])
+      drawn.splice(1, 1)
+    }
+    newPlayers[tidx] = target
+  }
 
   // ── Meccanismo speciale Peter Pan ────────────────────────────
   // Se Peter Pan viene rivelato tra le carte pescate, deve essere
@@ -1416,7 +1533,7 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
     players: newPlayers,
     phase: 'action',
     pendingInteraction: null,
-    ...(pendingFateReveal ? { pendingFateReveal } : {}),
+    pendingFateReveal: pendingFateReveal || null,
   }
 
   newState = addLog(
@@ -1657,6 +1774,8 @@ export function conditionDefeatHero(state, playerId, heroCardId) {
   const villain = VILLAINS[np.villainId]
   const heroCard = villain.fateDeck.find(c => c.id === heroCardId)
   if ((heroCard?.strength || 0) > 4) return { error: 'L\'Eroe ha Forza > 4: Malignità può sconfiggere solo Eroi con Forza ≤4.' }
+  // Rimuovi oggetti Fato assegnati all'Eroe
+  discardAssignedFateItems(np, heroCardId, heroLocIdx)
   np.board.locations[heroLocIdx].heroes = np.board.locations[heroLocIdx].heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
   updateCoveredActions(np, heroLocIdx, villain)
@@ -2125,9 +2244,11 @@ export function resolveFormadiDrago(state, playerId, heroCardId) {
     heroCard = v?.fateDeck.find(c => c.id === heroCardId)
     if (heroCard) break
   }
-  const forzaBase = heroCard?.strength || 0
-  const hasSonno = heroLoc.curses.some(id => id.startsWith('mal_c_son'))
-  const forzaAttuale = Math.max(0, forzaBase - (hasSonno ? 2 : 0))
+  const allCards = state.players.flatMap(p => {
+    const v = VILLAINS[p.villainId]
+    return v ? [...v.villainDeck, ...v.fateDeck] : []
+  })
+  const forzaAttuale = getHeroEffectiveStrength(heroCardId, heroCard, heroLoc, allCards)
 
   if (forzaAttuale > 3) {
     return { error: `Forma di Drago può sconfiggere solo Eroi con Forza effettiva ≤3. Forza attuale di "${heroCard?.name}": ${forzaAttuale}.` }
@@ -2135,12 +2256,16 @@ export function resolveFormadiDrago(state, playerId, heroCardId) {
 
   const newPlayers = deepClone(state.players)
   const np = newPlayers[pidx]
+
+  // Rimuovi oggetti Fato assegnati all'Eroe prima di rimuoverlo
+  discardAssignedFateItems(np, heroCardId, heroLocIdx)
+
   np.board.locations[heroLocIdx].heroes = np.board.locations[heroLocIdx].heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
   updateCoveredActions(np, heroLocIdx, villain)
 
   let newState = { ...state, players: newPlayers }
-  newState = addLog(newState, `Forma di Drago: "${heroCard?.name || heroCardId}" (forza attuale ${forzaAttuale}) sconfitto!`, 'action')
+  newState = addLog(newState, `Forma di Drago: "${heroCard?.name || heroCardId}" (forza effettiva ${forzaAttuale}) sconfitto!`, 'action')
 
   // Arcolaio: se presente nel luogo dove era l'eroe
   const arcolaioPresente = heroLoc.items.includes('mal_o_arc')
@@ -2148,7 +2273,7 @@ export function resolveFormadiDrago(state, playerId, heroCardId) {
     const potereGuadagnato = Math.max(0, forzaAttuale - 1)
     np.power += potereGuadagnato
     newState = { ...newState, players: newPlayers }
-    newState = addLog(newState, `Arcolaio: guadagni ${potereGuadagnato} Potere (forza attuale ${forzaAttuale} - 1, tot: ${np.power}).`, 'action')
+    newState = addLog(newState, `Arcolaio: guadagni ${potereGuadagnato} Potere (forza effettiva ${forzaAttuale} - 1, tot: ${np.power}).`, 'action')
   }
 
   // Flora sconfitta → reset carte scoperte
@@ -2162,6 +2287,8 @@ export function resolveFormadiDrago(state, playerId, heroCardId) {
 }
 
 // ─── EXPORT UTILS ────────────────────────────────────────────
+
+export { getHeroEffectiveStrength, getAllyEffectiveStrength }
 
 export default {
   generateRoomCode,
