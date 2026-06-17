@@ -331,8 +331,12 @@ export default function Game() {
       return
     }
     if (isMyTurn && phase === 'move') {
-      if (idx !== myPlayer.currentLocation || myPlayer?.svanireActive) setStagedLocation(idx)
-      return
+      // Non intercettare se una modalità ha bisogno del click sul luogo (es. azioni Corvo)
+      const needsLocClick = ['play_ally_location', 'move_ally_dest', 'cond_play_ally_location', 'cond_ossessione_location'].includes(mode)
+      if (!needsLocClick) {
+        if (idx !== myPlayer.currentLocation || myPlayer?.svanireActive) setStagedLocation(idx)
+        return
+      }
     }
     if (mode === 'play_ally_location') {
       const locName = myVillain?.locations[idx]?.name || `Luogo ${idx + 1}`

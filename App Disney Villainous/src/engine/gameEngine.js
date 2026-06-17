@@ -318,7 +318,7 @@ export function moveVillain(state, playerId, locationIndex) {
     const fvIdx = destLocState.curses.findIndex(id => id.startsWith('mal_c_fuo'))
     if (fvIdx >= 0) {
       const fvId = destLocState.curses.splice(fvIdx, 1)[0]
-      newPlayers[pidx].fateDiscard.push(fvId)
+      newPlayers[pidx].villainDiscard.push(fvId)
       fuocoVerdeLog = ` Fuoco Verde scartato!`
     }
   }
@@ -1528,7 +1528,7 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
       const { curseId, locIdx } = validLocs[0]
       const loc2 = target.board.locations[locIdx]
       loc2.curses = loc2.curses.filter(id => id !== curseId)
-      target.fateDiscard.push(curseId)
+      target.villainDiscard.push(curseId)
       const malCard = villain?.villainDeck.find(c => c.id === curseId)
       fateLogs.push(`C'era una Volta in un Sogno: "${malCard?.name || curseId}" scartata da "${villain?.locations[locIdx]?.name || locIdx}"!`)
     } else {
@@ -2162,7 +2162,7 @@ export function resolveReStefanoMove(state, actingPlayerId, targetPlayerId, dest
   let fvLog = ''
   if (fvIdx >= 0) {
     const fvId = destLoc.curses.splice(fvIdx, 1)[0]
-    nt.fateDiscard.push(fvId)
+    nt.villainDiscard.push(fvId)
     fvLog = ` Fuoco Verde scartato da "${destName}"!`
   }
 
@@ -2219,7 +2219,7 @@ export function resolveOnceuponatime(state, actingPlayerId, targetPlayerId, curs
   const newPlayers = deepClone(state.players)
   const nt = newPlayers[tidx]
   nt.board.locations[locIdx].curses = nt.board.locations[locIdx].curses.filter(id => id !== curseId)
-  nt.fateDiscard.push(curseId)
+  nt.villainDiscard.push(curseId)
 
   const malCard = villain.villainDeck.find(c => c.id === curseId)
   const locName = villain.locations[locIdx].name
