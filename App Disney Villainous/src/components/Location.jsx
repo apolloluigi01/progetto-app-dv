@@ -13,6 +13,7 @@ const VILLAIN_EMOJI = {
 
 export default function Location({
   villain,
+  player,             // giocatore proprietario della plancia (per buff/modificatori globali)
   locationDef,
   locationState,
   isVillainHere,
@@ -159,6 +160,30 @@ export default function Location({
             </button>
           )
         })}
+        {/* Azioni extra concesse da Oggetti nel Luogo (Cannone, Uncino da Cerimonia, Dispositivo) */}
+        {(actionQueue || []).filter(a => a.index >= locationDef.actions.length).map(a => {
+          const label = ACTION_LABELS[a.type]?.(a) ?? a.type
+          const color = ACTION_COLORS[a.type] ?? 'bg-gray-700'
+          return (
+            <button
+              key={`extra-${a.index}`}
+              onClick={(e) => { e.stopPropagation(); onActionClick?.(a.index, a) }}
+              disabled={a.done || !isActive || !onActionClick}
+              title={a.done ? 'Completata' : `${label} (da "${a.fromItem}")`}
+              className={[
+                'action-chip text-white border transition-all text-[10px]',
+                a.done
+                  ? `opacity-50 cursor-default ${color} border-transparent`
+                  : isActive && onActionClick
+                    ? `${color} border-amber-400/60 hover:opacity-90 cursor-pointer ring-1 ring-amber-300/30`
+                    : `${color} border-amber-400/40 opacity-70`,
+              ].join(' ')}
+            >
+              {a.done ? '✓ ' : '📦 '}
+              {label}
+            </button>
+          )
+        })}
       </div>
 
       {/* ── Contenuto luogo ── */}
@@ -203,12 +228,23 @@ export default function Location({
           const isSel   = selectedCardId === id
           const clickable = !!onAllyItemClick
           // Forza effettiva con modificatori dinamici
-          const effStrength = card ? getAllyEffectiveStrength(id, card, locationState) : null
+          const effStrength = card ? getAllyEffectiveStrength(id, card, locationState, player) : null
           const mods = []
           if (card && id.startsWith('mal_a_gra') && locationState.heroes?.length > 0)
             mods.push(`+${locationState.heroes.length} eroi`)
           if (card && id.startsWith('mal_a_sin') && locationState.curses?.length > 0)
             mods.push('+1 malediz.')
+          if (card && id === 'hk_a_spu' && locationState.id === 'jolly_roger')
+            mods.push('+2 Jolly Roger')
+          if (card && player?.tempAllyBuffs?.[id])
+            mods.push(`+${player.tempAllyBuffs[id]} fino a fine turno`)
+          const attachedAllyItems = Object.entries(locationState.allyItemAssignments || {})
+            .filter(([, aId]) => aId === id)
+          for (const [itemId] of attachedAllyItems) {
+            const itemCard = findCard(itemId)
+            const match = itemCard?.effect?.match(/\+(\d+) Forza/)
+            if (match) mods.push(`+${match[1]} ${itemCard.name}`)
+          }
           const strengthLabel = effStrength !== null
             ? `${effStrength}${mods.length ? ` [${mods.join(', ')}]` : ''}`
             : '?'
@@ -225,6 +261,15 @@ export default function Location({
                   title={`Forza base: ${card?.strength ?? '?'} | ${card?.effect || ''}`}>
               ⚔️ {card?.name || id} ({strengthLabel})
               {card && <span onClick={(e) => { e.stopPropagation(); setDetailCard(card) }} className="ml-0.5 text-[7px] text-gray-600 hover:text-blue-400 cursor-pointer border border-gray-700/60 rounded-full w-3 h-3 inline-flex items-center justify-center hover:border-blue-500/60 leading-none shrink-0 transition-colors">i</span>}
+              {/* Oggetti villain assegnati a questo alleato (es. Sciabola) */}
+              {attachedAllyItems.map(([itemId]) => {
+                const itemCard = findCard(itemId)
+                return (
+                  <span key={itemId} className="ml-1 text-amber-300 text-[8px] bg-amber-900/50 border border-amber-700/50 rounded px-1">
+                    📦 {itemCard?.name || itemId}
+                  </span>
+                )
+              })}
             </span>
           )
         })}
@@ -240,6 +285,8 @@ export default function Location({
           const assignments = locationState.fateItemAssignments || {}
           const isAssigned = isFateItem && Object.keys(assignments).includes(id)
           if (isAssigned) return null
+          // Se è un oggetto villain assegnato a un alleato (es. Sciabola): appare sull'alleato
+          if (Object.keys(locationState.allyItemAssignments || {}).includes(id)) return null
           return (
             <span key={id}
                   onClick={clickable ? (e) => { e.stopPropagation(); onAllyItemClick?.(id) } : undefined}
@@ -267,9 +314,16 @@ export default function Location({
           const assignments = locationState.fateItemAssignments || {}
           // Calcola forza effettiva e modificatori
           const allCardsFlat = [...villain.villainDeck, ...villain.fateDeck]
-          const effStrength = card ? getHeroEffectiveStrength(id, card, locationState, allCardsFlat) : null
+          const boardLocations = player?.board?.locations || null
+          const effStrength = card ? getHeroEffectiveStrength(id, card, locationState, allCardsFlat, boardLocations) : null
           const mods = []
           if (locationState.curses?.some(cid => cid.startsWith('mal_c_son'))) mods.push('-2 Sonno')
+          if (id === 'fhk_gianni' && Object.values(locationState.fateItemAssignments || {}).includes(id)) mods.push('+1 Oggetto')
+          if (id === 'fhk_michele' && boardLocations) {
+            const n = boardLocations.filter(l => (l.heroes?.length || 0) > 0).length
+            if (n > 0) mods.push(`+${n} Luoghi con Eroi`)
+          }
+          if (id !== 'fhk_wendy' && boardLocations?.some(l => l.heroes?.includes('fhk_wendy'))) mods.push('+1 Wendy')
           const assignedEntries = Object.entries(assignments).filter(([, hId]) => hId === id)
           for (const [itemId] of assignedEntries) {
             const itemCard = allCardsFlat.find(c => c.id === itemId)

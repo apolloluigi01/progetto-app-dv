@@ -220,13 +220,13 @@ export function useGame(roomCode) {
   }, [dispatch])
 
   // ── Play Villain Card ───────────────────────────────────
-  const playCard = useCallback((cardId, overrideLocationIndex = null) => {
-    return dispatch(engine.playVillainCard, myPlayerId, cardId, overrideLocationIndex)
+  const playCard = useCallback((cardId, overrideLocationIndex = null, payWithMap = false) => {
+    return dispatch(engine.playVillainCard, myPlayerId, cardId, overrideLocationIndex, payWithMap)
   }, [dispatch, myPlayerId])
 
   // ── Play Villain Card in luogo specifico ────────────────
-  const playCardToLocation = useCallback((cardId, locationIndex) => {
-    return dispatch(engine.playVillainCardToLocation, myPlayerId, cardId, locationIndex)
+  const playCardToLocation = useCallback((cardId, locationIndex, payWithMap = false) => {
+    return dispatch(engine.playVillainCardToLocation, myPlayerId, cardId, locationIndex, payWithMap)
   }, [dispatch, myPlayerId])
 
   // ── Discard Card ────────────────────────────────────────
@@ -352,6 +352,36 @@ export function useGame(roomCode) {
     return dispatch(engine.resolveFormadiDrago, myPlayerId, heroCardId)
   }, [dispatch, myPlayerId])
 
+  // ── Hook: Spaventare — scarta o riordina le 2 carte Fato ──
+  const resolveSpaventare = useCallback((discardBoth, topCardId = null) => {
+    return dispatch(engine.resolveSpaventare, myPlayerId, discardBoth, topCardId)
+  }, [dispatch, myPlayerId])
+
+  // ── Hook: Signorsì Signore! — muovi alleato +2 Forza ─────
+  const resolveSignorsi = useCallback((allyId, toLocIdx) => {
+    return dispatch(engine.resolveSignorsi, myPlayerId, allyId, toLocIdx)
+  }, [dispatch, myPlayerId])
+
+  // ── Hook: Muovi un Eroe (azione / Mr. Starkey) ───────────
+  const moveHero = useCallback((heroCardId, toLocIdx) => {
+    return dispatch(engine.moveHero, myPlayerId, heroCardId, toLocIdx)
+  }, [dispatch, myPlayerId])
+
+  // ── Hook: assegna Oggetto villain a un Alleato (Sciabola) ─
+  const assignAllyItem = useCallback((itemCardId, allyCardId) => {
+    return dispatch(engine.assignAllyItem, myPlayerId, itemCardId, allyCardId)
+  }, [dispatch, myPlayerId])
+
+  // ── Hook: Trilli — scarta un alleato dal suo luogo ───────
+  const resolveTrilliDiscard = useCallback((targetPlayerId, locationIndex, allyId) => {
+    return dispatch(engine.resolveTrilliDiscard, myPlayerId, targetPlayerId, locationIndex, allyId)
+  }, [dispatch, myPlayerId])
+
+  // ── Hook: Terribile Mal di Testa — scarta oggetto di Hook ─
+  const resolveMalDiTesta = useCallback((targetPlayerId, itemId, locationIndex) => {
+    return dispatch(engine.resolveMalDiTesta, myPlayerId, targetPlayerId, itemId, locationIndex)
+  }, [dispatch, myPlayerId])
+
   // ── End Turn (manuale fallback) ──────────────────────────
   const endTurn = useCallback(() => {
     return dispatch(engine.endTurn)
@@ -423,5 +453,11 @@ export function useGame(roomCode) {
     resolveReUbertoMove,
     resolveOnceuponatime,
     resolveFormadiDrago,
+    resolveSpaventare,
+    resolveSignorsi,
+    moveHero,
+    assignAllyItem,
+    resolveTrilliDiscard,
+    resolveMalDiTesta,
   }
 }

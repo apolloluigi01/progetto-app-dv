@@ -46,6 +46,8 @@ export default function PlayerBoard({
     if (activeMode === 'play_ally_location' || activeMode === 'move_ally_dest') return true
     // Condizioni: selezione luogo per alleato gratuito o Ossessione
     if (activeMode === 'cond_play_ally_location' || activeMode === 'cond_ossessione_location') return true
+    // Eroe rivelato (Degno Avversario): posizionamento sulla propria plancia
+    if (activeMode === 'aurora_place_hero') return true
     if (phase === 'move') return i !== player.currentLocation || player.svanireActive === true
     return false
   }
@@ -120,6 +122,7 @@ export default function PlayerBoard({
             <Location
               key={locDef.id}
               villain={villain}
+              player={player}
               locationDef={locDef}
               locationState={locState}
               isVillainHere={isVillainHere}

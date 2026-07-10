@@ -42,48 +42,127 @@ function addLog(state, message, type = 'info') {
   }
 }
 
+// Cerca la definizione di una carta in TUTTI i mazzi di tutti i villain.
+function findAnyCard(cardId) {
+  for (const v of Object.values(VILLAINS)) {
+    const c = v.villainDeck.find(c => c.id === cardId) || v.fateDeck.find(c => c.id === cardId)
+    if (c) return c
+  }
+  return null
+}
+
 // Calcola la forza effettiva di un eroe considerando tutti i modificatori attivi.
 // - Sonno Senza Sogni nel luogo: -2
-// - Oggetti Fato assegnati (es. Spada della Verità: +2): letti dall'effetto "+N Forza"
-function getHeroEffectiveStrength(heroCardId, heroCard, locationState, allCards) {
+// - Oggetti Fato assegnati (es. Spada della Verità / Polvere di Fata: +2): letti dall'effetto "+N Forza"
+// - Hook: Gianni (+1 se ha Oggetti assegnati), Michele (+1 per Luogo con Eroi),
+//   Wendy (+1 a tutti gli ALTRI Eroi) — questi ultimi due richiedono boardLocations.
+function getHeroEffectiveStrength(heroCardId, heroCard, locationState, allCards, boardLocations = null) {
   const base = heroCard?.strength || 0
   const hasSonno = locationState.curses?.some(id => id.startsWith('mal_c_son'))
   const fateItemBonus = Object.entries(locationState.fateItemAssignments || {})
     .filter(([, hId]) => hId === heroCardId)
     .reduce((sum, [itemId]) => {
-      const itemCard = allCards.find(c => c.id === itemId)
+      const itemCard = allCards.find(c => c.id === itemId) || findAnyCard(itemId)
       const match = itemCard?.effect?.match(/\+(\d+) Forza/)
       return sum + (match ? parseInt(match[1]) : 0)
     }, 0)
-  return Math.max(0, base - (hasSonno ? 2 : 0) + fateItemBonus)
+  let bonus = 0
+  // Gianni: +1 Forza se ha almeno un Oggetto assegnato
+  if (heroCardId === 'fhk_gianni') {
+    const hasItem = Object.values(locationState.fateItemAssignments || {}).some(hId => hId === heroCardId)
+    if (hasItem) bonus += 1
+  }
+  if (boardLocations) {
+    // Michele: +1 Forza per ogni Luogo del Reame che contiene un Eroe (incluso il suo)
+    if (heroCardId === 'fhk_michele') {
+      bonus += boardLocations.filter(loc => (loc.heroes?.length || 0) > 0).length
+    }
+    // Wendy: tutti gli ALTRI Eroi nel Reame ottengono +1 Forza
+    if (heroCardId !== 'fhk_wendy' && boardLocations.some(loc => loc.heroes?.includes('fhk_wendy'))) {
+      bonus += 1
+    }
+  }
+  return Math.max(0, base - (hasSonno ? 2 : 0) + fateItemBonus + bonus)
 }
 
 // Calcola la forza effettiva di un alleato considerando i modificatori dinamici.
-function getAllyEffectiveStrength(allyId, allyCard, locationState) {
+// - player (opzionale): serve per i buff temporanei (Signorsì Signore!: +2 fino a fine turno)
+// - Oggetti villain assegnati (Sciabola +2, Scimitarra +1): letti dall'effetto "+N Forza"
+function getAllyEffectiveStrength(allyId, allyCard, locationState, player = null) {
   let strength = allyCard?.strength || 0
   if (allyId.startsWith('mal_a_gra')) strength += (locationState.heroes?.length || 0)
   if (allyId.startsWith('mal_a_sin') && (locationState.curses?.length || 0) > 0) strength += 1
+  // Spugna: +2 Forza se si trova alla Jolly Roger
+  if (allyId === 'hk_a_spu' && locationState.id === 'jolly_roger') strength += 2
+  // Oggetti villain assegnati a questo alleato (es. Sciabola)
+  for (const [itemId, aId] of Object.entries(locationState.allyItemAssignments || {})) {
+    if (aId === allyId) {
+      const itemCard = findAnyCard(itemId)
+      const match = itemCard?.effect?.match(/\+(\d+) Forza/)
+      if (match) strength += parseInt(match[1])
+    }
+  }
+  // Buff temporanei (fino a fine turno)
+  if (player?.tempAllyBuffs?.[allyId]) strength += player.tempAllyBuffs[allyId]
   return Math.max(0, strength)
+}
+
+// Azioni extra concesse da Oggetti presenti in un Luogo (Capitan Uncino).
+// Queste azioni non possono essere coperte dagli Eroi (stanno sulla carta, non sul Luogo).
+function getItemGrantedActions(locState) {
+  const granted = []
+  for (const itemId of locState.items || []) {
+    if (itemId.startsWith('hk_o_can')) {
+      granted.push({ type: 'vanquish', fromItem: 'Cannone' })
+    } else if (itemId.startsWith('hk_o_unc')) {
+      granted.push({ type: 'gain_power', value: 1, fromItem: 'Uncino da Cerimonia' })
+    } else if (itemId === 'hk_o_dis') {
+      granted.push({ type: 'move_hero', fromItem: 'Dispositivo Ingegnoso' })
+      granted.push({ type: 'move_hero', fromItem: 'Dispositivo Ingegnoso' })
+    }
+  }
+  return granted
+}
+
+// Scarta gli oggetti villain assegnati a un alleato che lascia il gioco.
+function discardAllyAttachedItems(np, allyId, locIdx) {
+  const loc = np.board.locations[locIdx]
+  const assignments = loc.allyItemAssignments || {}
+  for (const [itemId, aId] of Object.entries(assignments)) {
+    if (aId === allyId) {
+      const idx = loc.items.indexOf(itemId)
+      if (idx >= 0) loc.items.splice(idx, 1)
+      delete loc.allyItemAssignments[itemId]
+      np.villainDiscard.push(itemId)
+    }
+  }
 }
 
 // Verifica se una carta Fato può essere legalmente giocata sul bersaglio.
 function canFateCardBePlayed(fateCard, targetPlayer) {
   if (!fateCard) return false
   if (fateCard.type === 'hero') {
-    // Non giocabile se TUTTI i luoghi hanno Fuoco Verde
+    // Non giocabile se TUTTI i luoghi sono bloccati o hanno Fuoco Verde
+    // (Peter Pan è gestito a parte in startFate e non passa da qui)
     const allBlocked = targetPlayer.board.locations.every(loc =>
-      loc.curses?.some(id => id.startsWith('mal_c_fuo'))
+      loc.isLocked || loc.curses?.some(id => id.startsWith('mal_c_fuo'))
     )
     return !allBlocked
   }
   if (fateCard.type === 'fate_item' && fateCard.effect?.includes('Assegna a un Eroe')) {
-    return targetPlayer.board.locations.some(loc => loc.heroes?.length > 0)
+    return targetPlayer.board.locations.some(loc => !loc.isLocked && loc.heroes?.length > 0)
   }
   if (fateCard.type === 'fate_effect') {
     // C'era una Volta in un Sogno: serve almeno un luogo con maledizione E eroe
     if (fateCard.id?.startsWith('fmal_sogno')) {
       return targetPlayer.board.locations.some(loc =>
         loc.curses?.length > 0 && loc.heroes?.length > 0
+      )
+    }
+    // Terribile Mal di Testa: serve almeno un Oggetto villain nel Reame di Hook
+    if (fateCard.id?.startsWith('fhk_mal')) {
+      return targetPlayer.board.locations.some(loc =>
+        loc.items?.some(id => id.startsWith('hk_o_'))
       )
     }
     return true
@@ -148,6 +227,7 @@ export function initializeGame(players) {
         wickets:              [],
         coveredActionIndices: [],
         fateItemAssignments:  {}, // { [fateItemId]: heroId }
+        allyItemAssignments:  {}, // { [villainItemId]: allyId } (es. Sciabola, Scimitarra)
         isLocked: loc.locked === true,
       }))
     }
@@ -332,6 +412,11 @@ export function moveVillain(state, playerId, locationIndex) {
     covered: locState.coveredActionIndices.includes(i),
     done: false,
   }))
+  // Azioni extra concesse da Oggetti nel Luogo (Cannone, Uncino da Cerimonia,
+  // Dispositivo Ingegnoso) — mai coperte dagli Eroi
+  getItemGrantedActions(locState).forEach((ga, k) => {
+    actionQueue.push({ ...ga, index: loc.actions.length + k, covered: false, done: false })
+  })
 
   let newState = {
     ...state,
@@ -390,8 +475,8 @@ export function completeAction(state, playerId, actionIndex) {
  * che il giocatore vuole piazzare in un luogo a scelta).
  * Richiama playVillainCard con overrideLocationIndex.
  */
-export function playVillainCardToLocation(state, playerId, cardId, locationIndex) {
-  return playVillainCard(state, playerId, cardId, locationIndex)
+export function playVillainCardToLocation(state, playerId, cardId, locationIndex, payWithMap = false) {
+  return playVillainCard(state, playerId, cardId, locationIndex, payWithMap)
 }
 
 /**
@@ -455,7 +540,12 @@ export function canPlayCard(state, playerId, cardId) {
   }
   const effectiveCost = Math.max(0, (card.cost || 0) - bastonBonus)
   if (effectiveCost > player.power) {
-    return { canPlay: false, reason: `Potere insufficiente. Costo: ${effectiveCost}${bastonBonus ? ` (ridotto da ${card.cost} per il Bastone)` : ''}, disponibile: ${player.power}.` }
+    // Mappa dell'Isola Che Non C'è: un Oggetto può essere pagato scartando la Mappa
+    const mapAvailable = card.type === 'item' && cardId !== 'hk_o_map' &&
+      player.board.locations.some(l => l.items.includes('hk_o_map'))
+    if (!mapAvailable) {
+      return { canPlay: false, reason: `Potere insufficiente. Costo: ${effectiveCost}${bastonBonus ? ` (ridotto da ${card.cost} per il Bastone)` : ''}, disponibile: ${player.power}.` }
+    }
   }
 
   // ── Helper: cerca la definizione di una carta Fato in tutti i mazzi ──
@@ -610,6 +700,16 @@ export function canPlayCard(state, playerId, cardId) {
   }
 
   // ────────────────────────────────────────────────────────────
+  // GENERICO: Oggetti con "assegnala/o a un Alleato" → almeno 1 Alleato nel Reame
+  // (Sciabola di Hook, Scimitarra di Jafar, ecc.)
+  // ────────────────────────────────────────────────────────────
+  if (card.type === 'item' && /[Aa]ssegnal[ao] a un Alleato/.test(card.effect || '')) {
+    if (allAlliesInRealm.length === 0) {
+      return { canPlay: false, reason: `"${card.name}": deve esserci almeno un Alleato nel Reame a cui assegnare questo Oggetto.` }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
   // MALEFICA: Forma di Drago → almeno un Eroe con forza effettiva ≤3 nel Reame
   // ────────────────────────────────────────────────────────────
   if (cardId.startsWith('mal_e_dra')) {
@@ -642,7 +742,7 @@ export function canPlayCard(state, playerId, cardId) {
  * Effects → si risolvono e vanno nello scarto.
  * Curses/Wickets → vanno nel loro luogo designato.
  */
-export function playVillainCard(state, playerId, cardId, overrideLocationIndex = null) {
+export function playVillainCard(state, playerId, cardId, overrideLocationIndex = null, payWithMap = false) {
   const pidx = getPlayerIndex(state, playerId)
   if (pidx < 0) return { error: 'Giocatore non trovato' }
 
@@ -678,9 +778,31 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
       if (hasSpadaWithHero) spadaBonus = 2
     }
   }
-  const finalCost = Math.max(0, effectiveCost + spadaBonus)
+  let finalCost = Math.max(0, effectiveCost + spadaBonus)
+
+  // ── Mappa dell'Isola Che Non C'è: paga un Oggetto scartando la Mappa ──
+  let mapPaymentLog = ''
+  if (payWithMap) {
+    if (card.type !== 'item' || cardId === 'hk_o_map') {
+      return { error: 'La Mappa può pagare solo il costo di un altro Oggetto.' }
+    }
+    let mapFound = false
+    for (const l of np.board.locations) {
+      const mIdx = l.items.indexOf('hk_o_map')
+      if (mIdx >= 0) {
+        l.items.splice(mIdx, 1)
+        np.villainDiscard.push('hk_o_map')
+        mapFound = true
+        break
+      }
+    }
+    if (!mapFound) return { error: 'La Mappa dell\'Isola Che Non C\'è non è nel tuo Reame.' }
+    finalCost = 0
+    mapPaymentLog = ' (costo pagato scartando la Mappa)'
+  }
+
   if (finalCost > player.power) {
-    return { error: `Potere insufficiente. Costo maledizione con Spada della Verità: ${finalCost} (base: ${card.cost}, Bastone: -${bastonBonus}, Spada: +2). Disponibile: ${player.power}.` }
+    return { error: `Potere insufficiente. Costo: ${finalCost}. Disponibile: ${player.power}.` }
   }
   // Paga il costo (già verificato in canPlayCard, integrato con Spada)
   np.power -= finalCost
@@ -706,6 +828,11 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
   }
 
   const loc = np.board.locations[targetLocIdx]
+
+  // Regola generale: non si possono giocare carte in un Luogo bloccato
+  if (loc.isLocked && ['ally', 'item', 'curse', 'wicket'].includes(card.type)) {
+    return { error: `"${villain.locations[targetLocIdx].name}" è bloccato: non puoi giocare carte qui.` }
+  }
 
   switch (card.type) {
     case 'ally':
@@ -854,10 +981,76 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
     }
   }
 
-  // Hook: Degno Avversario → guadagna 3 Potere automaticamente
-  if (cardId === 'hk_e_deg_1' || cardId === 'hk_e_deg_2' || cardId === 'hk_e_deg_3') {
-    np.power += 3
-    specialLogs.push(`Degno Avversario: +3 Potere (tot: ${np.power}). Rivela carte dal tuo mazzo Fato finché trovi un Eroe.`)
+  // ── Hook: variabili per interazioni pendenti ──
+  let pendingInteractionOut = null
+  let pendingFateRevealOut  = null
+
+  // Hook: Degno Avversario → +2 Potere, rivela dal proprio mazzo Fato finché non trovi un Eroe
+  if (cardId.startsWith('hk_e_deg')) {
+    np.power += 2
+    specialLogs.push(`Degno Avversario: +2 Potere (tot: ${np.power}).`)
+
+    const revealedNonHero = []
+    let foundHeroId = null
+    let safety = np.fateDeck.length + np.fateDiscard.length
+    while (safety-- > 0) {
+      if (np.fateDeck.length === 0) {
+        if (np.fateDiscard.length === 0) break
+        np.fateDeck = shuffle([...np.fateDiscard])
+        np.fateDiscard = []
+      }
+      const revealedId = np.fateDeck.shift()
+      const fc = villain.fateDeck.find(c => c.id === revealedId)
+      if (fc?.type === 'hero') { foundHeroId = revealedId; break }
+      revealedNonHero.push(revealedId)
+    }
+    np.fateDiscard.push(...revealedNonHero)
+    if (revealedNonHero.length > 0) {
+      const names = revealedNonHero.map(id => villain.fateDeck.find(c => c.id === id)?.name || id).join(', ')
+      specialLogs.push(`Degno Avversario: scartate ${revealedNonHero.length} carte non-Eroe (${names}).`)
+    }
+    if (foundHeroId === 'fhk_peter') {
+      // Peter Pan rivelato → va IMMEDIATAMENTE all'Albero dell'Impiccato, anche se bloccato
+      const treeIdx = np.board.locations.findIndex(l => l.id === 'albero_impiccato')
+      np.board.locations[treeIdx].heroes.push('fhk_peter')
+      updateCoveredActions(np, treeIdx, villain)
+      specialLogs.push(`⚡ Peter Pan rivelato! Va immediatamente all'Albero dell'Impiccato (anche se bloccato).`)
+    } else if (foundHeroId) {
+      const heroName = villain.fateDeck.find(c => c.id === foundHeroId)?.name || foundHeroId
+      pendingFateRevealOut = { actorPlayerId: playerId, targetPlayerId: playerId, heroCardId: foundHeroId }
+      specialLogs.push(`Degno Avversario: rivelato "${heroName}"! Scegli dove giocarlo nel tuo Reame.`)
+    } else {
+      specialLogs.push(`Degno Avversario: nessun Eroe trovato nel mazzo Fato.`)
+    }
+  }
+
+  // Hook: Spaventare → guarda le prime 2 carte del proprio mazzo Fato
+  if (cardId.startsWith('hk_e_spa')) {
+    if (np.fateDeck.length < 2 && np.fateDiscard.length > 0) {
+      np.fateDeck = [...np.fateDeck, ...shuffle([...np.fateDiscard])]
+      np.fateDiscard = []
+    }
+    const top = np.fateDeck.slice(0, Math.min(2, np.fateDeck.length))
+    if (top.length === 0) {
+      specialLogs.push(`Spaventare: il mazzo Fato è vuoto, nessuna carta da guardare.`)
+    } else {
+      pendingInteractionOut = { type: 'spaventare', playerId, cards: top }
+      specialLogs.push(`Spaventare: guardi le prime ${top.length} carte del tuo mazzo Fato. Scartale entrambe o rimettile in cima.`)
+    }
+  }
+
+  // Hook: Signorsì Signore! → muovi un Alleato in un Luogo adiacente sbloccato (+2 Forza fino a fine turno)
+  if (cardId.startsWith('hk_e_sig')) {
+    pendingInteractionOut = { type: 'signorsi', playerId }
+    specialLogs.push(`Signorsì Signore!: scegli un Alleato da muovere in un Luogo adiacente sbloccato (+2 Forza fino a fine turno).`)
+  }
+
+  // Hook: Mr. Starkey → puoi muovere un Eroe dal suo Luogo a un Luogo adiacente sbloccato
+  if (cardId === 'hk_a_sta') {
+    const starkeyLoc = np.board.locations[targetLocIdx]
+    if ((starkeyLoc.heroes?.length || 0) > 0) {
+      specialLogs.push(`Mr. Starkey: puoi muovere un Eroe dal suo Luogo a un Luogo adiacente sbloccato.`)
+    }
   }
 
   // Regina di Cuori: Tirare → rivela 5 carte dal mazzo, vince se costo totale ≥ 8
@@ -886,9 +1079,30 @@ export function playVillainCard(state, playerId, cardId, overrideLocationIndex =
     }
   }
 
-  let newState = { ...state, players: newPlayers }
+  // ── Oggetto che concede azioni giocato nel Luogo corrente durante il turno:
+  //    le nuove azioni diventano subito disponibili nella coda azioni
+  let newActionQueue = state.actionQueue
+  if (card.type === 'item' && targetLocIdx === np.currentLocation && state.phase === 'action') {
+    const grantedByThisCard = getItemGrantedActions({ items: [cardId] })
+    if (grantedByThisCard.length > 0) {
+      const baseIdx = Math.max(-1, ...state.actionQueue.map(a => a.index)) + 1
+      newActionQueue = [
+        ...state.actionQueue,
+        ...grantedByThisCard.map((ga, k) => ({ ...ga, index: baseIdx + k, covered: false, done: false })),
+      ]
+      specialLogs.push(`"${card.name}": nuova azione disponibile in questo Luogo da subito.`)
+    }
+  }
+
+  let newState = {
+    ...state,
+    players: newPlayers,
+    actionQueue: newActionQueue,
+    pendingInteraction: pendingInteractionOut || state.pendingInteraction,
+    pendingFateReveal: pendingFateRevealOut || state.pendingFateReveal,
+  }
   const locName = villain.locations[targetLocIdx].name
-  let costDesc = `costo ${finalCost}`
+  let costDesc = `costo ${finalCost}${mapPaymentLog}`
   if (bastonBonus > 0) costDesc += ` (${card.cost}-1 Bastone)`
   if (spadaBonus > 0) costDesc += ` (+2 Spada della Verità)`
   newState = addLog(newState, `${player.name} gioca "${card.name}" in "${locName}" (${costDesc}).`, 'action')
@@ -991,19 +1205,44 @@ export function moveAllyOrItem(state, playerId, cardId, fromLocationIndex, toLoc
   const from = np.board.locations[fromLocationIndex]
   const to   = np.board.locations[toLocationIndex]
 
+  // Regola generale: non si possono spostare carte in un Luogo bloccato
+  if (to.isLocked) {
+    return { error: 'Il luogo di destinazione è bloccato.' }
+  }
+
   // Trova e sposta la carta
   const categories = ['allies', 'items', 'curses', 'wickets']
   let moved = false
+  let movedCat = null
   for (const cat of categories) {
     const idx = from[cat].indexOf(cardId)
     if (idx >= 0) {
       from[cat].splice(idx, 1)
       to[cat].push(cardId)
       moved = true
+      movedCat = cat
       break
     }
   }
   if (!moved) return { error: 'Carta non trovata nel luogo specificato.' }
+
+  // Alleato spostato: gli oggetti assegnati (es. Sciabola) lo seguono
+  if (movedCat === 'allies') {
+    for (const [itemId, aId] of Object.entries(from.allyItemAssignments || {})) {
+      if (aId === cardId) {
+        const iIdx = from.items.indexOf(itemId)
+        if (iIdx >= 0) from.items.splice(iIdx, 1)
+        delete from.allyItemAssignments[itemId]
+        to.items.push(itemId)
+        if (!to.allyItemAssignments) to.allyItemAssignments = {}
+        to.allyItemAssignments[itemId] = cardId
+      }
+    }
+  }
+  // Oggetto assegnato spostato da solo: si stacca dall'alleato
+  if (movedCat === 'items' && from.allyItemAssignments?.[cardId]) {
+    delete from.allyItemAssignments[cardId]
+  }
 
   const fromName = villain.locations[fromLocationIndex].name
   const toName   = villain.locations[toLocationIndex].name
@@ -1079,20 +1318,33 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     return { error: 'L\'Eroe non è presente nel tuo Reame.' }
   }
 
-  // Verifica che tutti gli alleati siano nello STESSO luogo dell'Eroe
+  // Trova il luogo di ogni alleato usato
+  const allyLocOf = {}
   for (const allyId of allyCardIds) {
-    const inSameLoc = player.board.locations[heroLocIdx].allies.includes(allyId)
-    if (!inSameLoc) {
-      const locName = villain.locations[heroLocIdx].name
-      return { error: `Lo Scontro può avvenire solo tra Alleati ed Eroi nello stesso luogo. L'Alleato non si trova in "${locName}".` }
+    for (let i = 0; i < player.board.locations.length; i++) {
+      if (player.board.locations[i].allies.includes(allyId)) { allyLocOf[allyId] = i; break }
     }
   }
 
-  // Calcola forza totale alleati (con modificatori dinamici)
-  const heroLocState = player.board.locations[heroLocIdx]
+  // Verifica posizione alleati: stesso luogo dell'Eroe,
+  // OPPURE Banda d'Arrembaggio in un Luogo adiacente (se il Luogo dell'Eroe è sbloccato)
+  for (const allyId of allyCardIds) {
+    const aLocIdx = allyLocOf[allyId]
+    if (aLocIdx === undefined) {
+      return { error: 'Alleato non trovato nel Reame.' }
+    }
+    if (aLocIdx === heroLocIdx) continue
+    const isBanda = allyId.startsWith('hk_a_ban')
+    if (isBanda && Math.abs(aLocIdx - heroLocIdx) === 1 && !player.board.locations[heroLocIdx].isLocked) continue
+    const locName = villain.locations[heroLocIdx].name
+    return { error: `Lo Scontro può avvenire solo tra Alleati ed Eroi nello stesso luogo (eccezione: la Banda d'Arrembaggio può colpire un Luogo adiacente sbloccato). L'Alleato non può raggiungere "${locName}".` }
+  }
+
+  // Calcola forza totale alleati (con modificatori dinamici, ognuno dal proprio Luogo)
   const totalAllyStrength = allyCardIds.reduce((sum, allyId) => {
     const ally = villain.villainDeck.find(c => c.id === allyId)
-    return sum + getAllyEffectiveStrength(allyId, ally, heroLocState)
+    const aLocState = player.board.locations[allyLocOf[allyId]]
+    return sum + getAllyEffectiveStrength(allyId, ally, aLocState, player)
   }, 0)
 
   // Forza dell'Eroe: cerca in tutti i mazzi Fato di tutti i giocatori
@@ -1108,7 +1360,7 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
     const v = VILLAINS[p.villainId]
     return v ? [...v.villainDeck, ...v.fateDeck] : []
   })
-  const heroStrength = getHeroEffectiveStrength(heroCardId, heroCard, player.board.locations[heroLocIdx], allCards)
+  const heroStrength = getHeroEffectiveStrength(heroCardId, heroCard, player.board.locations[heroLocIdx], allCards, player.board.locations)
 
   if (totalAllyStrength < heroStrength) {
     return {
@@ -1120,6 +1372,27 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
   if (heroCard?.name === 'Guardie' && player.villainId === 'maleficent') {
     if (allyCardIds.length < 2) {
       return { error: 'Le Guardie richiedono almeno 2 Alleati per essere sconfitte con lo Scontro.' }
+    }
+  }
+
+  // I Bimbi Sperduti (Hook): richiedono almeno 2 Alleati per lo Scontro
+  if (heroCardId.startsWith('fhk_bimbi') && allyCardIds.length < 2) {
+    return { error: 'I Bimbi Sperduti richiedono almeno 2 Alleati per essere sconfitti con lo Scontro.' }
+  }
+
+  // Schernire (Hook): gli Eroi con Schernire vanno sconfitti PRIMA degli altri
+  if (player.villainId === 'hook') {
+    const heroHasTaunt = Object.entries(player.board.locations[heroLocIdx].fateItemAssignments || {})
+      .some(([iId, hId]) => hId === heroCardId && iId.startsWith('fhk_sch'))
+    if (!heroHasTaunt) {
+      const tauntedHeroExists = player.board.locations.some(loc =>
+        Object.entries(loc.fateItemAssignments || {}).some(([iId, hId]) =>
+          iId.startsWith('fhk_sch') && loc.heroes.includes(hId)
+        )
+      )
+      if (tauntedHeroExists) {
+        return { error: 'Schernire: devi sconfiggere prima gli Eroi con Schernire assegnato.' }
+      }
     }
   }
 
@@ -1147,11 +1420,15 @@ export function vanquish(state, playerId, heroCardId, allyCardIds) {
   nloc.heroes = nloc.heroes.filter(id => id !== heroCardId)
   np.fateDiscard.push(heroCardId)
 
-  // Rimuovi e scarta gli Alleati usati per lo Scontro
+  // Rimuovi e scarta gli Alleati usati per lo Scontro (ognuno dal proprio Luogo,
+  // la Banda d'Arrembaggio può trovarsi in un Luogo adiacente) + oggetti assegnati
   const discardedAllyNames = []
   for (const allyId of allyCardIds) {
-    const idx = nloc.allies.indexOf(allyId)
-    if (idx >= 0) nloc.allies.splice(idx, 1)
+    const aLocIdx = allyLocOf[allyId]
+    const aLoc = np.board.locations[aLocIdx]
+    discardAllyAttachedItems(np, allyId, aLocIdx)
+    const idx = aLoc.allies.indexOf(allyId)
+    if (idx >= 0) aLoc.allies.splice(idx, 1)
     np.villainDiscard.push(allyId)
     const allyCard = villain.villainDeck.find(c => c.id === allyId)
     discardedAllyNames.push(allyCard?.name || allyId)
@@ -1275,6 +1552,7 @@ export function startFate(state, playerId, targetPlayerId) {
     let newState = {
       ...state,
       players: newPlayers,
+      fateDoneThisTurn: true,
       // Resta in fase 'action', non si va a fate_choice
     }
     newState = addLog(newState, `${actor?.name} usa Fato contro ${targetP?.name}!`, 'fate')
@@ -1378,6 +1656,11 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
 
   const villain = VILLAINS[target.villainId]
 
+  // ── Regola generale: niente carte Fato in un Luogo bloccato (eccezione: Peter Pan)
+  if (loc.isLocked && cardId !== 'fhk_peter' && fateCard.type !== 'fate_effect') {
+    return { error: `Il luogo è bloccato: non è possibile giocare carte qui.` }
+  }
+
   // ── Validazione restrizioni di luogo per gli Eroi
   if (fateCard.type === 'hero') {
     // Fuoco Verde: nessun Eroe può essere giocato qui
@@ -1433,6 +1716,14 @@ export function placeFateCard(state, cardId, targetPlayerId, locationIndex) {
       const discarded = loc.curses.splice(forestaIdx, 1)[0]
       target.fateDiscard.push(discarded)
       fateLogs.push(`${fateCard.name} (Forza ${fateCard.strength}) scarta la Foresta di Rovi in "${locName}"!`)
+    }
+  }
+
+  // ── Hook: Trilli → puoi scartare un Alleato dal suo Luogo (scelta gestita dalla UI)
+  if (cardId === 'fhk_trilli' && target.villainId === 'hook') {
+    const trilliLoc = target.board.locations[locationIndex]
+    if ((trilliLoc.allies?.length || 0) > 0) {
+      fateLogs.push(`Trilli: ci sono ${trilliLoc.allies.length} Alleato/i in questo Luogo. Puoi scartarne uno.`)
     }
   }
 
@@ -1692,6 +1983,11 @@ export function respondConditionActivation(state, responderId, approved) {
     newState = addLog(newState, `Astuzia: ${np.name} può giocare un Alleato gratuitamente.`, 'condition')
   } else if (cid.startsWith('hk_k_oss')) {
     const hkVillain = VILLAINS[np.villainId]
+    // Ricicla gli scarti se il mazzo Fato è esaurito
+    if (np.fateDeck.length === 0 && np.fateDiscard.length > 0) {
+      np.fateDeck = shuffle([...np.fateDiscard])
+      np.fateDiscard = []
+    }
     const discardedNonHero = []
     let foundHeroId = null
     for (const fid of np.fateDeck) {
@@ -1701,7 +1997,13 @@ export function respondConditionActivation(state, responderId, approved) {
     }
     np.fateDeck = np.fateDeck.filter(id => !discardedNonHero.includes(id) && id !== foundHeroId)
     np.fateDiscard = [...np.fateDiscard, ...discardedNonHero]
-    if (foundHeroId) {
+    if (foundHeroId === 'fhk_peter') {
+      // Peter Pan rivelato → DEVE essere giocato immediatamente all'Albero dell'Impiccato
+      const treeIdx = np.board.locations.findIndex(l => l.id === 'albero_impiccato')
+      np.board.locations[treeIdx].heroes.push('fhk_peter')
+      updateCoveredActions(np, treeIdx, hkVillain)
+      newState = addLog(newState, `⚡ Ossessione: Peter Pan rivelato! Va immediatamente all'Albero dell'Impiccato (anche se bloccato).`, 'condition')
+    } else if (foundHeroId) {
       condEffect = { type: 'ossessione_choice', playerId: pending.playerId, foundHeroId }
       const heroName = hkVillain.fateDeck.find(c => c.id === foundHeroId)?.name || foundHeroId
       newState = addLog(newState, `Ossessione: trovato "${heroName}". Scegli se giocarlo o scartarlo.`, 'condition')
@@ -1881,6 +2183,7 @@ export function conditionOssessioneResolve(state, playerId, playHero, locationIn
     if (locationIndex === undefined || locationIndex === null) return { error: 'Scegli un luogo dove giocare l\'Eroe.' }
     const loc = np.board.locations[locationIndex]
     if (!loc) return { error: 'Luogo non trovato.' }
+    if (loc.isLocked) return { error: 'Il luogo è bloccato: non è possibile giocare l\'Eroe qui.' }
     loc.heroes.push(effect.foundHeroId)
     updateCoveredActions(np, locationIndex, villain)
     const locName = villain.locations[locationIndex]?.name || '?'
@@ -1998,8 +2301,8 @@ export function endTurn(state) {
   // Pesca
   let newState = drawCards(state, currentPlayer.id)
 
-  // Resetta conditionsTriggered per tutti i giocatori
-  const resetPlayers = newState.players.map(p => ({ ...p, conditionsTriggered: [] }))
+  // Resetta conditionsTriggered e buff temporanei (es. Signorsì Signore!) per tutti i giocatori
+  const resetPlayers = newState.players.map(p => ({ ...p, conditionsTriggered: [], tempAllyBuffs: {} }))
   newState = { ...newState, players: resetPlayers }
 
   // Passa al prossimo giocatore
@@ -2295,6 +2598,225 @@ export function resolveFormadiDrago(state, playerId, heroCardId) {
   return newState
 }
 
+// ─── NUOVE FUNZIONI CAPITAN UNCINO ───────────────────────────
+
+/**
+ * Risolve Spaventare: scarta le 2 carte guardate oppure rimettile in cima
+ * nell'ordine scelto (topCardId sarà la prima carta a essere pescata).
+ */
+export function resolveSpaventare(state, playerId, discardBoth, topCardId = null) {
+  const pi = state.pendingInteraction
+  if (!pi || pi.type !== 'spaventare') return { error: 'Nessun effetto Spaventare in corso.' }
+  if (pi.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const villain = VILLAINS[np.villainId]
+  const cards = pi.cards
+
+  // Rimuovi le carte guardate dalla cima del mazzo
+  np.fateDeck = np.fateDeck.filter(id => !cards.includes(id))
+
+  let msg
+  if (discardBoth) {
+    np.fateDiscard.push(...cards)
+    const names = cards.map(id => villain.fateDeck.find(c => c.id === id)?.name || id).join(', ')
+    msg = `Spaventare: ${np.name} scarta entrambe le carte guardate (${names}).`
+  } else {
+    let ordered = cards
+    if (cards.length === 2 && topCardId && cards.includes(topCardId)) {
+      ordered = [topCardId, cards.find(id => id !== topCardId)]
+    }
+    np.fateDeck = [...ordered, ...np.fateDeck]
+    msg = `Spaventare: ${np.name} rimette le carte in cima al mazzo Fato nell'ordine scelto.`
+  }
+
+  let newState = { ...state, players: newPlayers, pendingInteraction: null }
+  newState = addLog(newState, msg, 'action')
+  return newState
+}
+
+/**
+ * Risolve Signorsì Signore!: muove un Alleato in un Luogo adiacente sbloccato
+ * e gli assegna +2 Forza fino alla fine del turno.
+ */
+export function resolveSignorsi(state, playerId, allyId, toLocIdx) {
+  const pi = state.pendingInteraction
+  if (!pi || pi.type !== 'signorsi') return { error: 'Nessun effetto Signorsì Signore! in corso.' }
+  if (pi.playerId !== playerId) return { error: 'Non sei il giocatore dell\'effetto.' }
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+
+  let fromLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].allies.includes(allyId)) { fromLocIdx = i; break }
+  }
+  if (fromLocIdx < 0) return { error: 'Alleato non trovato nel Reame.' }
+  if (Math.abs(fromLocIdx - toLocIdx) !== 1) return { error: 'Devi scegliere un Luogo adiacente.' }
+  if (player.board.locations[toLocIdx].isLocked) return { error: 'Il Luogo di destinazione è bloccato.' }
+
+  // Sposta (con eventuali oggetti assegnati al seguito)
+  const moved = moveAllyOrItem(state, playerId, allyId, fromLocIdx, toLocIdx)
+  if (moved?.error) return moved
+
+  const newPlayers = deepClone(moved.players)
+  const np = newPlayers[pidx]
+  np.tempAllyBuffs = { ...(np.tempAllyBuffs || {}), [allyId]: ((np.tempAllyBuffs || {})[allyId] || 0) + 2 }
+
+  const allyCard = villain.villainDeck.find(c => c.id === allyId)
+  let newState = { ...moved, players: newPlayers, pendingInteraction: null }
+  newState = addLog(newState, `Signorsì Signore!: "${allyCard?.name || allyId}" ottiene +2 Forza fino alla fine del turno.`, 'action')
+  return newState
+}
+
+/**
+ * Muove un Eroe del PROPRIO Reame in un Luogo adiacente sbloccato.
+ * Usato dall'azione "Muovi un Eroe" e da Mr. Starkey.
+ * Gli oggetti Fato assegnati all'Eroe lo seguono.
+ */
+export function moveHero(state, playerId, heroCardId, toLocIdx) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+
+  let fromLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].heroes.includes(heroCardId)) { fromLocIdx = i; break }
+  }
+  if (fromLocIdx < 0) return { error: 'Eroe non trovato nel Reame.' }
+  if (toLocIdx < 0 || toLocIdx >= player.board.locations.length) return { error: 'Luogo non valido.' }
+  if (Math.abs(fromLocIdx - toLocIdx) !== 1) return { error: 'Puoi muovere un Eroe solo in un Luogo adiacente.' }
+  if (player.board.locations[toLocIdx].isLocked) return { error: 'Il Luogo di destinazione è bloccato.' }
+  // Fuoco Verde non impedisce il movimento (solo il giocare), nessun check qui
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+  const from = np.board.locations[fromLocIdx]
+  const to   = np.board.locations[toLocIdx]
+
+  from.heroes = from.heroes.filter(id => id !== heroCardId)
+  to.heroes.push(heroCardId)
+
+  // Oggetti Fato assegnati seguono l'Eroe
+  for (const [itemId, hId] of Object.entries(from.fateItemAssignments || {})) {
+    if (hId === heroCardId) {
+      const iIdx = from.items.indexOf(itemId)
+      if (iIdx >= 0) from.items.splice(iIdx, 1)
+      delete from.fateItemAssignments[itemId]
+      to.items.push(itemId)
+      if (!to.fateItemAssignments) to.fateItemAssignments = {}
+      to.fateItemAssignments[itemId] = heroCardId
+    }
+  }
+
+  updateCoveredActions(np, fromLocIdx, villain)
+  updateCoveredActions(np, toLocIdx, villain)
+
+  const heroCard = findAnyCard(heroCardId)
+  const fromName = villain.locations[fromLocIdx].name
+  const toName   = villain.locations[toLocIdx].name
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `${np.name} muove l'Eroe "${heroCard?.name || heroCardId}" da "${fromName}" a "${toName}".`, 'action')
+  return newState
+}
+
+/**
+ * Assegna un Oggetto villain a un Alleato (Sciabola, Scimitarra...).
+ * Se l'Alleato è in un altro Luogo, l'Oggetto lo raggiunge.
+ */
+export function assignAllyItem(state, playerId, itemCardId, allyCardId) {
+  const pidx = getPlayerIndex(state, playerId)
+  if (pidx < 0) return { error: 'Giocatore non trovato.' }
+  const player = state.players[pidx]
+  const villain = VILLAINS[player.villainId]
+
+  let itemLocIdx = -1, allyLocIdx = -1
+  for (let i = 0; i < player.board.locations.length; i++) {
+    if (player.board.locations[i].items.includes(itemCardId)) itemLocIdx = i
+    if (player.board.locations[i].allies.includes(allyCardId)) allyLocIdx = i
+  }
+  if (itemLocIdx < 0) return { error: 'Oggetto non trovato nel Reame.' }
+  if (allyLocIdx < 0)  return { error: 'Alleato non trovato nel Reame.' }
+
+  const newPlayers = deepClone(state.players)
+  const np = newPlayers[pidx]
+
+  // Se in luoghi diversi, l'oggetto raggiunge l'alleato
+  if (itemLocIdx !== allyLocIdx) {
+    const fromLoc = np.board.locations[itemLocIdx]
+    const iIdx = fromLoc.items.indexOf(itemCardId)
+    if (iIdx >= 0) fromLoc.items.splice(iIdx, 1)
+    np.board.locations[allyLocIdx].items.push(itemCardId)
+  }
+  const loc = np.board.locations[allyLocIdx]
+  if (!loc.allyItemAssignments) loc.allyItemAssignments = {}
+  loc.allyItemAssignments[itemCardId] = allyCardId
+
+  const itemCard = villain.villainDeck.find(c => c.id === itemCardId)
+  const allyCard = villain.villainDeck.find(c => c.id === allyCardId)
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `"${itemCard?.name || itemCardId}" assegnato a "${allyCard?.name || allyCardId}".`, 'action')
+  return newState
+}
+
+/**
+ * Risolve Trilli: scarta (o no) un Alleato dal Luogo di Trilli.
+ * allyId = null → nessuno scartato ("puoi").
+ */
+export function resolveTrilliDiscard(state, actingPlayerId, targetPlayerId, locationIndex, allyId = null) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+
+  if (!allyId) {
+    return addLog(state, `Trilli: nessun Alleato scartato.`, 'fate')
+  }
+
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+  const loc = target.board.locations[locationIndex]
+  if (!loc || !loc.allies.includes(allyId)) return { error: 'Alleato non trovato nel Luogo di Trilli.' }
+
+  discardAllyAttachedItems(target, allyId, locationIndex)
+  loc.allies = loc.allies.filter(id => id !== allyId)
+  target.villainDiscard.push(allyId)
+
+  const villain = VILLAINS[target.villainId]
+  const allyCard = villain.villainDeck.find(c => c.id === allyId)
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Trilli: "${allyCard?.name || allyId}" scartato dal suo Luogo!`, 'fate')
+  return newState
+}
+
+/**
+ * Risolve Terribile Mal di Testa: scarta un Oggetto villain dal Reame di Hook.
+ */
+export function resolveMalDiTesta(state, actingPlayerId, targetPlayerId, itemId, locationIndex) {
+  const tidx = getPlayerIndex(state, targetPlayerId)
+  if (tidx < 0) return { error: 'Giocatore target non trovato.' }
+
+  const newPlayers = deepClone(state.players)
+  const target = newPlayers[tidx]
+  const loc = target.board.locations[locationIndex]
+  if (!loc || !loc.items.includes(itemId)) return { error: 'Oggetto non trovato nel Luogo indicato.' }
+  if (!itemId.startsWith('hk_o_')) return { error: 'Terribile Mal di Testa può scartare solo Oggetti di Capitan Uncino.' }
+
+  loc.items = loc.items.filter(id => id !== itemId)
+  if (loc.allyItemAssignments?.[itemId]) delete loc.allyItemAssignments[itemId]
+  target.villainDiscard.push(itemId)
+
+  const villain = VILLAINS[target.villainId]
+  const itemCard = villain.villainDeck.find(c => c.id === itemId)
+  let newState = { ...state, players: newPlayers }
+  newState = addLog(newState, `Terribile Mal di Testa: "${itemCard?.name || itemId}" scartato dal Reame di ${target.name}!`, 'fate')
+  return newState
+}
+
 // ─── EXPORT UTILS ────────────────────────────────────────────
 
 export { getHeroEffectiveStrength, getAllyEffectiveStrength }
@@ -2349,4 +2871,10 @@ export default {
   resolveReUbertoMove,
   resolveOnceuponatime,
   resolveFormadiDrago,
+  resolveSpaventare,
+  resolveSignorsi,
+  moveHero,
+  assignAllyItem,
+  resolveTrilliDiscard,
+  resolveMalDiTesta,
 }

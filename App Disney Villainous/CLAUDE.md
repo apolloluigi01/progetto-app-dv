@@ -29,10 +29,11 @@ supabase/
 2026-06-12 — aggiornati costi, forze, nomi ed effetti di tutte le carte dei 6 villain base in `src/data/villains.js` per allineamento al testo ufficiale Ravensburger.
 2026-06-12 — implementata regola "puoi" in `gameEngine.js` (`canPlayCard`): effetti obbligatori bloccano la giocata se le pre-condizioni non sono soddisfatte.
 2026-06-12 — 4 fix generali: Assegna a un Eroe obbligatorio (engine + UI), pile scarti visibili, log collassabile, meccanica Attiva corretta ([Attiva]).
+2026-07-10 — implementazione completa Capitan Uncino (engine + UI): forze dinamiche (Spugna, Gianni, Michele, Wendy), Banda d'Arrembaggio (Scontro anche in Luogo adiacente sbloccato), Bimbi Sperduti (≥2 alleati), Schernire/Taunt (priorità nello Scontro), Degno Avversario (+2 Potere + rivelazione Fato reale, Peter Pan immediato all'Albero), Spaventare, Signorsì Signore! (buff +2 fino a fine turno), Mr. Starkey, Trilli, Terribile Mal di Testa, Sciabola (assegnazione a un Alleato — meccanica generica, copre anche Scimitarra di Jafar), Mappa dell'Isola Che Non C'è (sblocco Albero + paga Oggetti scartandola), azioni extra dei Luoghi da Oggetti (Cannone/Uncino da Cerimonia/Dispositivo Ingegnoso), azione "Muovi un Eroe" implementata davvero, Ossessione con Peter Pan immediato. Regola generale nuova: non si giocano/spostano carte in Luoghi bloccati (eccezione Peter Pan).
 
 ## Villain implementati (tutti in versione bozza — da migliorare)
-- [ ] Capitan Uncino
-- [ ] Malefica
+- [x] Capitan Uncino (implementazione completa 2026-07-10 — in attesa di test utente)
+- [x] Malefica (completata e testata)
 - [ ] Ursula
 - [ ] Principe Giovanni
 - [ ] Jafar

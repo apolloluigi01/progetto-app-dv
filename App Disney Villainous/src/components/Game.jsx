@@ -68,6 +68,8 @@ export default function Game() {
     completeAction, endTurn,
     resolveFilippoDiscard, resolveReStefanoMove, resolveReUbertoMove,
     resolveOnceuponatime, resolveFormadiDrago,
+    resolveSpaventare, resolveSignorsi, moveHero, assignAllyItem,
+    resolveTrilliDiscard, resolveMalDiTesta,
   } = useGame(roomCode)
 
   const [corvoUsed,    setCorvoUsed]    = useState(false)
@@ -260,8 +262,14 @@ export default function Game() {
       }
 
     } else if (action.type === 'move_hero') {
-      setUiMsg('Muovi Eroe: sposta un Eroe della plancia avversaria in un luogo adiacente (operazione manuale).')
-      await exec(completeAction, actionIndex)
+      const heroesInRealm = myPlayer.board.locations.flatMap(loc => loc.heroes)
+      if (heroesInRealm.length === 0) {
+        setActionError('Muovi un Eroe: nessun Eroe nel tuo Reame.')
+        return
+      }
+      setMode('move_hero_pick')
+      setModeData({ actionIndex })
+      setUiMsg('Muovi un Eroe: scegli l\'Eroe da spostare in un Luogo adiacente sbloccato.')
 
     } else {
       await exec(completeAction, actionIndex)
@@ -324,6 +332,11 @@ export default function Game() {
 
   // ── Click su luogo (mia plancia) ─────────────────────────
   async function handleMyLocationClick(idx) {
+    // Eroe rivelato (Degno Avversario): si posiziona sulla PROPRIA plancia
+    if (mode === 'aurora_place_hero' && gameState.pendingFateReveal?.targetPlayerId === myPlayerId) {
+      await exec(placeRevealedHero, idx)
+      return
+    }
     if (mode === 'corvo_dest_pick') {
       if (idx === corvoLocIdx) { setActionError('Scegli un luogo diverso da quello attuale del Corvo.'); return }
       const res = await exec(moveCorvoAlly, idx)
@@ -356,11 +369,32 @@ export default function Game() {
   }
 
   // ── Conferma gioca alleato/oggetto in luogo ───────────────
-  async function handleConfirmPlayAlly() {
-    const res = await exec(playCardToLocation, modeData.cardId, modeData.targetLocIdx)
+  async function handleConfirmPlayAlly(payWithMap = false) {
+    const cardId = modeData.cardId
+    const targetLocIdx = modeData.targetLocIdx
+    const card = myVillain?.villainDeck.find(c => c.id === cardId)
+    const res = await exec(playCardToLocation, cardId, targetLocIdx, payWithMap)
     if (!res?.error) {
       if (modeData.isCorvoAction) { setCorvoUsed(true); setCorvoDestIdx(null) }
       else await exec(completeAction, modeData.actionIndex)
+
+      // Oggetto "assegnala/o a un Alleato" (Sciabola, Scimitarra): scelta obbligatoria
+      if (card?.type === 'item' && /[Aa]ssegnal[ao] a un Alleato/.test(card.effect || '')) {
+        setMode('assign_ally_item')
+        setModeData({ itemCardId: cardId, itemName: card.name })
+        return
+      }
+
+      // Mr. Starkey: puoi muovere un Eroe dal suo Luogo a un Luogo adiacente sbloccato
+      if (cardId === 'hk_a_sta') {
+        const heroesHere = myPlayer?.board.locations[targetLocIdx]?.heroes || []
+        if (heroesHere.length > 0) {
+          setMode('starkey_move')
+          setModeData({ starkeyLocIdx: targetLocIdx })
+          return
+        }
+      }
+
       resetMode()
     }
   }
@@ -502,7 +536,7 @@ export default function Game() {
     const locState = myPlayer?.board.locations.find(loc => loc.heroes?.includes(heroId))
     if (!locState) return c.strength || 0
     const allCards = myVillain ? [...myVillain.villainDeck, ...myVillain.fateDeck] : []
-    return getHeroEffectiveStrength(heroId, c, locState, allCards)
+    return getHeroEffectiveStrength(heroId, c, locState, allCards, myPlayer?.board.locations)
   }
   function getAllyStrength() {
     if (!myVillain || !modeData.selectedAllyIds) return 0
@@ -510,7 +544,7 @@ export default function Game() {
       const c = myVillain.villainDeck.find(x => x.id === id)
       if (!c) return sum
       const locState = myPlayer?.board.locations.find(loc => loc.allies?.includes(id))
-      return sum + (locState ? getAllyEffectiveStrength(id, c, locState) : (c.strength || 0))
+      return sum + (locState ? getAllyEffectiveStrength(id, c, locState, myPlayer) : (c.strength || 0))
     }, 0)
   }
 
@@ -536,7 +570,14 @@ export default function Game() {
     const card    = VILLAINS[targetP?.villainId]?.fateDeck.find(c => c.id === cardId)
     setFatePendingCard(null)
     await exec(resolveFate, cardId)
-    if (card?.type === 'fate_effect') await exec(placeFateCard, cardId, targetPlayerId, 0)
+    if (card?.type === 'fate_effect') {
+      const res = await exec(placeFateCard, cardId, targetPlayerId, 0)
+      // Terribile Mal di Testa: l'attore sceglie quale Oggetto di Hook scartare
+      if (!res?.error && cardId.startsWith('fhk_mal')) {
+        setMode('malditesta_pick')
+        setModeData({ malDiTestaTarget: targetPlayerId })
+      }
+    }
   }
 
   async function handlePlaceFateCard(locationIndex) {
@@ -553,6 +594,16 @@ export default function Game() {
         if (isMandatory || locHeroes.length > 0) {
           setMode('assign_fate_item')
           setModeData({ itemCardId: pi.cardId, itemName: card.name, targetPlayerId: pi.targetPlayerId, locationIndex, isMandatory })
+          return
+        }
+      }
+
+      // Trilli (Hook) — puoi scartare un Alleato dal suo Luogo
+      if (pi.cardId === 'fhk_trilli' && targetP?.villainId === 'hook') {
+        const loc = targetP?.board.locations[locationIndex]
+        if (loc && loc.allies.length > 0) {
+          setMode('trilli_discard')
+          setModeData({ trilliData: { targetPlayerId: pi.targetPlayerId, locationIndex } })
           return
         }
       }
@@ -923,14 +974,38 @@ export default function Game() {
               )}
 
               {/* Pannello conferma gioca alleato/oggetto/maledizione/wicket */}
-              {isMyTurn && mode === 'play_ally_confirm' && (
-                <ConfirmPanel
-                  message={`Gioca "${modeData.cardName}" in "${modeData.targetLocName}"?`}
-                  onConfirm={handleConfirmPlayAlly}
-                  onCancel={() => { setMode('play_ally_location'); setModeData(prev => ({ ...prev, targetLocIdx: null, targetLocName: null })) }}
-                  confirmLabel="✓ Gioca"
-                />
-              )}
+              {isMyTurn && mode === 'play_ally_confirm' && (() => {
+                const card = myVillain?.villainDeck.find(c => c.id === modeData.cardId)
+                const mapAvailable = card?.type === 'item' && modeData.cardId !== 'hk_o_map' &&
+                  myPlayer.board.locations.some(l => l.items.includes('hk_o_map'))
+                return (
+                  <div className="flex items-center gap-3 bg-yellow-950/40 border border-yellow-700/50 rounded-xl px-4 py-3">
+                    <div className="flex-1">
+                      <p className="text-xs text-yellow-300 font-display font-bold">
+                        Gioca "{modeData.cardName}" in "{modeData.targetLocName}"?
+                      </p>
+                      {mapAvailable && (
+                        <p className="text-[11px] text-yellow-600 mt-0.5">
+                          🗺️ Puoi pagare il costo scartando la Mappa dell'Isola Che Non C'è.
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+                      <button onClick={() => { setMode('play_ally_location'); setModeData(prev => ({ ...prev, targetLocIdx: null, targetLocName: null })) }}
+                              className="btn-secondary text-xs px-3 py-1.5">Annulla</button>
+                      <button onClick={() => handleConfirmPlayAlly(false)} className="btn-primary text-xs px-4 py-1.5">
+                        ✓ Gioca (paga {card?.cost ?? 0} Potere)
+                      </button>
+                      {mapAvailable && (
+                        <button onClick={() => handleConfirmPlayAlly(true)}
+                                className="btn-secondary text-xs px-4 py-1.5 border-amber-600/60 text-amber-300 hover:border-amber-400">
+                          🗺️ Gioca scartando la Mappa
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
 
               {/* Pannello conferma sposta alleato/oggetto */}
               {isMyTurn && mode === 'move_ally_confirm' && (
@@ -1051,12 +1126,14 @@ export default function Game() {
               {/* Pannello Aurora: posiziona eroe rivelato */}
               {mode === 'aurora_place_hero' && gameState.pendingFateReveal?.actorPlayerId === myPlayerId && (() => {
                 const heroCard = findCardFromAll(gameState, gameState.pendingFateReveal.heroCardId)
+                const revealTarget = gameState.players.find(p => p.id === gameState.pendingFateReveal.targetPlayerId)
+                const isOwnBoard = gameState.pendingFateReveal.targetPlayerId === myPlayerId
                 return (
                   <div className="bg-rose-950/40 border border-rose-700/50 rounded-xl p-4 flex flex-col gap-3">
-                    <h3 className="font-display text-rose-300 font-bold text-sm">⚡ Aurora: Eroe Rivelato</h3>
+                    <h3 className="font-display text-rose-300 font-bold text-sm">⚡ Eroe Rivelato dal mazzo Fato</h3>
                     <p className="text-sm text-gray-300">
-                      Aurora ha rivelato <strong>"{heroCard?.name || gameState.pendingFateReveal.heroCardId}"</strong> dal mazzo Fato di Malefica.
-                      Clicca un luogo nella plancia di Malefica per posizionarlo.
+                      È stato rivelato <strong>"{heroCard?.name || gameState.pendingFateReveal.heroCardId}"</strong> dal mazzo Fato di {revealTarget?.name}.
+                      Clicca un luogo {isOwnBoard ? 'della TUA plancia' : `nella plancia di ${revealTarget?.name}`} per posizionarlo.
                     </p>
                     {heroCard && <Card card={heroCard} small showEffect={false} />}
                   </div>
@@ -1170,8 +1247,9 @@ export default function Game() {
                       return {
                         id,
                         locIdx: i,
+                        locLocked: loc.isLocked === true,
                         locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}`,
-                        effectiveStrength: card ? getHeroEffectiveStrength(id, card, loc, allCards) : 0,
+                        effectiveStrength: card ? getHeroEffectiveStrength(id, card, loc, allCards, myPlayer.board.locations) : 0,
                       }
                     })
                   })}
@@ -1182,7 +1260,7 @@ export default function Game() {
                         id,
                         locIdx: i,
                         locName: myVillain?.locations[i]?.name || `Luogo ${i + 1}`,
-                        effectiveStrength: card ? getAllyEffectiveStrength(id, card, loc) : 0,
+                        effectiveStrength: card ? getAllyEffectiveStrength(id, card, loc, myPlayer) : 0,
                       }
                     })
                   )}
@@ -1418,6 +1496,291 @@ export default function Game() {
               </div>
             </section>
           )}
+
+          {/* ── Hook: Spaventare — guarda le prime 2 carte Fato ── */}
+          {gameState.pendingInteraction?.type === 'spaventare' &&
+           gameState.pendingInteraction.playerId === myPlayerId && (() => {
+            const cards = gameState.pendingInteraction.cards
+            const cardObjs = cards.map(id => findCardFromAll(gameState, id)).filter(Boolean)
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-sky-950/40 border border-sky-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-sky-300 font-bold text-sm">👻 Spaventare — prime {cards.length} carte del tuo mazzo Fato</h3>
+                  <div className="flex gap-3 flex-wrap">
+                    {cardObjs.map(c => <Card key={c.id} card={c} small />)}
+                  </div>
+                  <p className="text-xs text-sky-400">Scartale entrambe, oppure rimettile in cima scegliendo quale sarà la PRIMA a essere pescata.</p>
+                  <div className="flex gap-2 flex-wrap">
+                    <button onClick={() => exec(resolveSpaventare, true, null)} className="btn-primary text-xs px-4">
+                      🗑️ Scarta {cards.length === 2 ? 'entrambe' : 'la carta'}
+                    </button>
+                    {cards.length === 2 ? (
+                      cardObjs.map(c => (
+                        <button key={c.id} onClick={() => exec(resolveSpaventare, false, c.id)} className="btn-secondary text-xs px-3">
+                          ⬆️ Rimetti ("{c.name}" per prima)
+                        </button>
+                      ))
+                    ) : (
+                      <button onClick={() => exec(resolveSpaventare, false, null)} className="btn-secondary text-xs px-3">
+                        ⬆️ Rimetti in cima
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook: Signorsì Signore! — muovi alleato +2 Forza ── */}
+          {gameState.pendingInteraction?.type === 'signorsi' &&
+           gameState.pendingInteraction.playerId === myPlayerId && (() => {
+            const allAllies = myPlayer.board.locations.flatMap((loc, li) =>
+              loc.allies.map(id => ({
+                id, locIdx: li,
+                name: myVillain?.villainDeck.find(c => c.id === id)?.name || id,
+                locName: myVillain?.locations[li]?.name || `Luogo ${li + 1}`,
+              }))
+            )
+            const sel = modeData.signorsiAllyId
+              ? allAllies.find(a => a.id === modeData.signorsiAllyId)
+              : null
+            const destinations = sel
+              ? [sel.locIdx - 1, sel.locIdx + 1].filter(i =>
+                  i >= 0 && i < myPlayer.board.locations.length && !myPlayer.board.locations[i].isLocked)
+              : []
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-blue-950/40 border border-blue-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-blue-300 font-bold text-sm">⚓ Signorsì Signore! — muovi un Alleato (+2 Forza fino a fine turno)</h3>
+                  {!sel ? (
+                    <>
+                      <p className="text-xs text-blue-400">Scegli l'Alleato da muovere in un Luogo adiacente sbloccato:</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {allAllies.map(a => (
+                          <button key={a.id} onClick={() => setModeData(prev => ({ ...prev, signorsiAllyId: a.id }))}
+                                  className="btn-secondary text-xs px-3">
+                            ⚔️ {a.name} — {a.locName}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-xs text-blue-400">"{sel.name}" selezionato. Scegli il Luogo adiacente sbloccato:</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {destinations.map(di => (
+                          <button key={di} onClick={async () => {
+                            const res = await exec(resolveSignorsi, sel.id, di)
+                            if (!res?.error) setModeData(prev => ({ ...prev, signorsiAllyId: null }))
+                          }} className="btn-primary text-xs px-3">
+                            📍 {myVillain?.locations[di]?.name}
+                          </button>
+                        ))}
+                        <button onClick={() => setModeData(prev => ({ ...prev, signorsiAllyId: null }))}
+                                className="btn-secondary text-xs px-3">← Cambia Alleato</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook: Mr. Starkey — puoi muovere un Eroe dal suo Luogo ── */}
+          {isMyTurn && mode === 'starkey_move' && (() => {
+            const locIdx = modeData.starkeyLocIdx
+            const heroesHere = myPlayer.board.locations[locIdx]?.heroes || []
+            const selHero = modeData.starkeyHeroId
+            const destinations = [locIdx - 1, locIdx + 1].filter(i =>
+              i >= 0 && i < myPlayer.board.locations.length && !myPlayer.board.locations[i].isLocked)
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-cyan-950/40 border border-cyan-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-cyan-300 font-bold text-sm">🧭 Mr. Starkey — puoi muovere un Eroe dal suo Luogo</h3>
+                  {!selHero ? (
+                    <div className="flex gap-2 flex-wrap">
+                      {heroesHere.map(hId => {
+                        const hCard = findCardFromAll(gameState, hId)
+                        return (
+                          <button key={hId} onClick={() => setModeData(prev => ({ ...prev, starkeyHeroId: hId }))}
+                                  className="btn-secondary text-xs px-3">
+                            🛡️ {hCard?.name || hId}
+                          </button>
+                        )
+                      })}
+                      <button onClick={resetMode} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">Salta</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2 flex-wrap">
+                      {destinations.map(di => (
+                        <button key={di} onClick={async () => {
+                          const res = await exec(moveHero, selHero, di)
+                          if (!res?.error) resetMode()
+                        }} className="btn-primary text-xs px-3">
+                          📍 {myVillain?.locations[di]?.name}
+                        </button>
+                      ))}
+                      <button onClick={() => setModeData(prev => ({ ...prev, starkeyHeroId: null }))}
+                              className="btn-secondary text-xs px-3">← Cambia Eroe</button>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook: azione Muovi un Eroe ── */}
+          {isMyTurn && mode === 'move_hero_pick' && (() => {
+            const heroesInRealm = myPlayer.board.locations.flatMap((loc, li) =>
+              loc.heroes.map(id => ({ id, locIdx: li }))
+            )
+            const selHero = modeData.moveHeroId
+              ? heroesInRealm.find(h => h.id === modeData.moveHeroId)
+              : null
+            const destinations = selHero
+              ? [selHero.locIdx - 1, selHero.locIdx + 1].filter(i =>
+                  i >= 0 && i < myPlayer.board.locations.length && !myPlayer.board.locations[i].isLocked)
+              : []
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-pink-950/40 border border-pink-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-pink-300 font-bold text-sm">👣 Muovi un Eroe</h3>
+                  {!selHero ? (
+                    <div className="flex gap-2 flex-wrap">
+                      {heroesInRealm.map(h => {
+                        const hCard = findCardFromAll(gameState, h.id)
+                        return (
+                          <button key={h.id} onClick={() => setModeData(prev => ({ ...prev, moveHeroId: h.id }))}
+                                  className="btn-secondary text-xs px-3">
+                            🛡️ {hCard?.name || h.id} — {myVillain?.locations[h.locIdx]?.name}
+                          </button>
+                        )
+                      })}
+                      <button onClick={resetMode} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">Annulla</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2 flex-wrap">
+                      {destinations.length === 0 && (
+                        <p className="text-xs text-pink-400 italic">Nessun Luogo adiacente sbloccato disponibile.</p>
+                      )}
+                      {destinations.map(di => (
+                        <button key={di} onClick={async () => {
+                          const res = await exec(moveHero, selHero.id, di)
+                          if (!res?.error) {
+                            await exec(completeAction, modeData.actionIndex)
+                            resetMode()
+                          }
+                        }} className="btn-primary text-xs px-3">
+                          📍 {myVillain?.locations[di]?.name}
+                        </button>
+                      ))}
+                      <button onClick={() => setModeData(prev => ({ ...prev, moveHeroId: null }))}
+                              className="btn-secondary text-xs px-3">← Cambia Eroe</button>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook: assegna Oggetto a un Alleato (Sciabola, Scimitarra...) ── */}
+          {isMyTurn && mode === 'assign_ally_item' && (() => {
+            const alliesInRealm = myPlayer.board.locations.flatMap((loc, li) =>
+              loc.allies.map(id => ({
+                id, locIdx: li,
+                name: myVillain?.villainDeck.find(c => c.id === id)?.name || id,
+                locName: myVillain?.locations[li]?.name || `Luogo ${li + 1}`,
+              }))
+            )
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-amber-300 font-bold text-sm">
+                    ⚔️ Assegna "{modeData.itemName}" a un Alleato
+                  </h3>
+                  <div className="flex gap-2 flex-wrap">
+                    {alliesInRealm.map(a => (
+                      <button key={a.id} onClick={async () => {
+                        const res = await exec(assignAllyItem, modeData.itemCardId, a.id)
+                        if (!res?.error) resetMode()
+                      }} className="btn-secondary text-xs px-3">
+                        ⚔️ {a.name} — {a.locName}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-amber-600">L'Oggetto raggiunge l'Alleato scelto e gli resta assegnato.</p>
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook (Fato): Trilli — puoi scartare un Alleato dal suo Luogo ── */}
+          {isMyTurn && mode === 'trilli_discard' && modeData.trilliData && (() => {
+            const targetP = gameState.players.find(p => p.id === modeData.trilliData.targetPlayerId)
+            const tVillain = VILLAINS[targetP?.villainId]
+            const loc = targetP?.board.locations[modeData.trilliData.locationIndex]
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-emerald-950/40 border border-emerald-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-emerald-300 font-bold text-sm">🧚 Trilli — puoi scartare un Alleato dal suo Luogo</h3>
+                  <div className="flex gap-2 flex-wrap">
+                    {(loc?.allies || []).map(aId => {
+                      const aCard = tVillain?.villainDeck.find(c => c.id === aId)
+                      return (
+                        <button key={aId} onClick={async () => {
+                          await exec(resolveTrilliDiscard, modeData.trilliData.targetPlayerId, modeData.trilliData.locationIndex, aId)
+                          resetMode()
+                        }} className="btn-secondary text-xs px-3">
+                          ⚔️ {aCard?.name || aId}
+                        </button>
+                      )
+                    })}
+                    <button onClick={async () => {
+                      await exec(resolveTrilliDiscard, modeData.trilliData.targetPlayerId, modeData.trilliData.locationIndex, null)
+                      resetMode()
+                    }} className="btn-secondary text-xs px-3 border-gray-700 text-gray-500">✗ Non scartare</button>
+                  </div>
+                </div>
+              </section>
+            )
+          })()}
+
+          {/* ── Hook (Fato): Terribile Mal di Testa — scarta un Oggetto di Hook ── */}
+          {isMyTurn && mode === 'malditesta_pick' && modeData.malDiTestaTarget && (() => {
+            const targetP = gameState.players.find(p => p.id === modeData.malDiTestaTarget)
+            const tVillain = VILLAINS[targetP?.villainId]
+            const items = (targetP?.board.locations || []).flatMap((loc, li) =>
+              loc.items.filter(id => id.startsWith('hk_o_')).map(id => ({
+                id, locIdx: li,
+                name: tVillain?.villainDeck.find(c => c.id === id)?.name || id,
+                locName: tVillain?.locations[li]?.name || `Luogo ${li + 1}`,
+              }))
+            )
+            return (
+              <section className="p-4 shrink-0">
+                <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4 flex flex-col gap-3">
+                  <h3 className="font-display text-red-300 font-bold text-sm">🤕 Terribile Mal di Testa — scarta un Oggetto dal Reame di {targetP?.name}</h3>
+                  {items.length === 0 ? (
+                    <>
+                      <p className="text-xs text-red-400 italic">Nessun Oggetto nel Reame.</p>
+                      <button onClick={resetMode} className="btn-secondary text-xs px-3 self-start">Chiudi</button>
+                    </>
+                  ) : (
+                    <div className="flex gap-2 flex-wrap">
+                      {items.map(it => (
+                        <button key={it.id} onClick={async () => {
+                          await exec(resolveMalDiTesta, modeData.malDiTestaTarget, it.id, it.locIdx)
+                          resetMode()
+                        }} className="btn-secondary text-xs px-3">
+                          📦 {it.name} — {it.locName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            )
+          })()}
 
           {/* ── Condizioni fuori turno: pannello attivazione ── */}
           {myConditions.length > 0 && !gameState.pendingConditionActivation && !gameState.pendingConditionEffect && (
@@ -1670,11 +2033,15 @@ function VanquishPanel({ myVillain, heroes, allies, selectedHeroId, selectedAlly
   allyStrength, heroStrength, onSelectHero, onToggleAlly, onConfirm, onCancel }) {
   const canConfirm = selectedHeroId && selectedAllyIds.length > 0 && allyStrength >= heroStrength
   // Trova il locIdx dell'eroe selezionato per filtrare gli alleati
-  const selectedHeroLocIdx = selectedHeroId
-    ? heroes.find(h => h.id === selectedHeroId)?.locIdx ?? null
-    : null
+  const selectedHero = selectedHeroId ? heroes.find(h => h.id === selectedHeroId) : null
+  const selectedHeroLocIdx = selectedHero?.locIdx ?? null
+  // Stesso luogo dell'eroe, oppure Banda d'Arrembaggio in un luogo adiacente
+  // (solo se il luogo dell'eroe è sbloccato)
   const filteredAllies = selectedHeroLocIdx !== null
-    ? allies.filter(a => a.locIdx === selectedHeroLocIdx)
+    ? allies.filter(a =>
+        a.locIdx === selectedHeroLocIdx ||
+        (a.id.startsWith('hk_a_ban') && Math.abs(a.locIdx - selectedHeroLocIdx) === 1 && !selectedHero?.locLocked)
+      )
     : allies
   return (
     <div className="bg-red-950/40 border border-red-700/50 rounded-xl p-4 flex flex-col gap-3">
@@ -1698,7 +2065,7 @@ function VanquishPanel({ myVillain, heroes, allies, selectedHeroId, selectedAlly
       </div>
       <div>
         <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-1">
-          2. Alleati da usare{selectedHeroLocIdx !== null ? ` (stesso luogo dell'eroe)` : ''}
+          2. Alleati da usare{selectedHeroLocIdx !== null ? ` (stesso luogo dell'eroe — la Banda d'Arrembaggio anche da un luogo adiacente)` : ''}
         </p>
         {filteredAllies.length === 0 && selectedHeroId && (
           <p className="text-[11px] text-yellow-500 italic">Nessun alleato nel luogo dell'eroe selezionato.</p>
